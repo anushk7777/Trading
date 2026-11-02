@@ -1,0 +1,181 @@
+# indquant default configuration.
+# Every number here is a research assumption - review before trusting any result.
+# Override on the command line with:  --set core.top_n=30 --set swing.enabled=false
+
+general:
+  initial_capital: 1000000        # INR, total across both sleeves
+  start: "2014-01-01"             # first date of price history to load
+  backtest_start: null            # first trading date of the backtest (null = start + warm-up)
+  end: null                       # null = latest available
+  seed: 42
+  output_dir: output
+
+data:
+  source: yahoo                   # yahoo | csv | synthetic
+  cache_dir: data/cache
+  cache_max_age_hours: 12
+  csv_dir: data/csv               # for source=csv: one <SYMBOL>.csv per stock (Date,Open,High,Low,Close,Volume)
+  universe: nifty500              # nifty50 | nifty100 | nifty200 | nifty500 | niftymidcap150 | niftysmallcap250 | file
+  universe_file: null             # CSV with columns Symbol[,Industry] when universe=file
+  membership_file: null           # optional point-in-time membership CSV (date,symbol) - removes survivorship bias
+  fundamentals_file: null         # optional point-in-time fundamentals CSV (see README)
+  benchmark: NIFTYBEES.NS         # investable total-return benchmark (Nifty 50 ETF, dividends adjusted)
+  regime_index: ^NSEI             # index used for regime filter and beta
+  synthetic:                      # only used when source=synthetic
+    n_stocks: 150
+    n_days: 2520
+    start: "2015-01-01"
+    alpha_strength: 1.0           # 0 = pure random walk (no edge exists)
+
+universe_filter:
+  min_price: 20.0                 # INR
+  min_adv_inr: 50000000           # 5 crore average daily traded value
+  adv_window: 63
+  min_history_days: 300
+
+costs:                            # Equity delivery (CNC) charges - verify with your broker, rates change
+  brokerage_pct: 0.0              # Zerodha/most discount brokers: 0 for delivery
+  brokerage_max_per_order: 20.0
+  stt_buy_pct: 0.001              # 0.1%
+  stt_sell_pct: 0.001             # 0.1%
+  exchange_txn_pct: 0.0000297     # NSE 0.00297%
+  sebi_fee_pct: 0.000001          # Rs 10 per crore
+  stamp_duty_buy_pct: 0.00015     # 0.015% on buy
+  gst_pct: 0.18                   # on brokerage + exchange + SEBI fees
+  dp_charge_per_sell: 15.93       # per scrip per sell day (incl. GST)
+  slippage_bps: 5.0               # fixed half-spread assumption
+  impact_coef: 0.1                # square-root market impact: coef * daily_vol * sqrt(order/ADV)
+  max_slippage: 0.02
+
+allocation:                       # capital split between sleeves (must sum to <= 1)
+  core: 0.7
+  swing: 0.3
+
+core:                             # multi-factor portfolio, monthly rebalance
+  enabled: true
+  top_n: 25
+  buffer_mult: 1.6                # keep a holding while its rank <= top_n * buffer_mult (turnover control)
+  weighting: inverse_vol          # equal | inverse_vol
+  max_weight: 0.08
+  sector_cap: 0.25
+  sector_neutral: false
+  min_trade_pct: 0.01             # skip trades smaller than 1% of sleeve equity
+  cash_buffer: 0.01
+  ml_weight: 0.5                  # blend: (1-w)*factor composite + w*ML ranker (if ml.enabled)
+  ic_weighting: false             # use trailing realised IC to weight factors instead of fixed weights
+  factor_weights:
+    mom_12_1: 1.0
+    idio_mom: 1.0
+    mom_6_1: 0.5
+    low_vol: 0.75
+    trend: 0.5
+    high_52w: 0.5
+    low_beta: 0.0
+    reversal_1m: 0.25
+
+swing:                            # daily swing signals with ATR brackets
+  enabled: true
+  universe_top_liquid: 200        # trade only the N most liquid eligible stocks
+  max_positions: 8
+  risk_per_trade: 0.0075          # 0.75% of sleeve equity risked per trade (entry - stop)
+  max_position_pct: 0.20
+  atr_window: 14
+  stop_atr: 2.0
+  target_atr: 3.0
+  max_hold_days: 15
+  breakeven_after_atr: 1.0        # move stop to entry once price is +1 ATR (null disables)
+  min_expected_r: 0.10            # min ML-predicted expected R-multiple AFTER round-trip costs
+                                  # (R = trade return / risk to stop; 0.10 = +10% of the risked amount)
+  max_new_per_day: 3
+  cash_buffer: 0.01
+  filters:                        # reasons NOT to trade - every candidate must pass all of them
+    min_stop_pct: 0.015           # stop closer than 1.5% of price = inside normal noise
+    max_stop_pct: 0.10            # stop wider than 10% = too volatile for the risk budget
+    max_day_move: 0.08            # signal-day move > 8% = chasing / near circuit limit
+    max_extension_atr: 3.0        # close more than 3 ATR above 20-DMA = over-extended
+    max_range_atr: 2.5            # signal-day high-low range > 2.5 ATR = erratic / wide spread
+    max_pct_of_adv: 0.02          # order value must be < 2% of average daily traded value
+    reentry_cooldown_days: 10     # no re-entry into a symbol within N days of a losing exit
+    max_per_sector: 2
+    max_correlation: 0.80         # 63-day return correlation with any open position
+    max_portfolio_heat: 0.05      # total open risk (sum of entry-to-stop losses) / equity
+    news_veto_below: -0.30        # decayed headline sentiment below this blocks entries
+    event_blackout_days: 3        # no entries this many sessions before a known event (results etc.)
+
+risk:
+  target_vol: 0.15                # annualised portfolio volatility target (core sleeve)
+  vol_lookback: 126
+  regime_filter: true
+  regime_ma: 200
+  regime_exposure: 0.5            # core exposure multiplier when index < MA; swing takes no new entries
+                                  # (drawdown control lives in the `governor` section)
+  cash_yield: 0.05                # yield on idle cash (only if you park it in a liquid ETF / fund)
+  risk_free_rate: 0.06            # for Sharpe / Sortino
+
+governor:                         # account-level circuit breakers (apply to every sleeve)
+  enabled: true
+  max_drawdown_halt: 0.25         # kill switch: stop new entries when drawdown from peak >= 25%
+  resume_drawdown: 0.15           # ...and resume once drawdown recovers to <= 15%
+  halt_exposure: 0.30             # core exposure multiplier while halted
+  profit_lock_activation: 0.20    # "trap door": arm a trailing equity floor once equity is +20% vs start
+  profit_lock_trail: 0.12         # floor = peak * (1 - trail), only ratchets up
+  profit_lock_exposure: 0.5       # exposure / size multiplier after the floor is breached...
+  profit_lock_cooldown_days: 21   # ...for this many sessions, then the lock re-bases and must be re-earned
+  loss_streak: 4                  # after N consecutive losing trades...
+  loss_streak_size_mult: 0.5      # ...halve position sizes
+  loss_streak_cooldown_days: 10   # ...for this many sessions
+
+sentiment:
+  file: null                      # point-in-time sentiment CSV (symbol,timestamp,score) for backtests
+  history_file: data/sentiment/history.csv   # live headlines are appended here every run
+  live_fetch: false               # fetch RSS headlines during signals / paper-update
+  halflife_days: 3
+  feeds:
+    - https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms
+    - https://www.moneycontrol.com/rss/business.xml
+    - https://www.business-standard.com/rss/markets-106.rss
+    - https://www.livemint.com/rss/markets
+
+events:
+  file: null                      # CSV symbol,date[,type] of known events (results, AGMs) for blackouts
+
+healthcheck:
+  max_stale_days: 4               # refuse to signal if data is older than this many business days
+  min_coverage: 0.80              # share of universe that must have a price on the last date
+  max_extreme_moves: 0.05         # share of universe with |1-day move| > 20% that indicates bad data
+
+ml:
+  enabled: true
+  min_train_years: 3
+  retrain_every_months: 6
+  embargo_days: 10
+  core_horizon: 21                # forward trading days for the core ranker label
+  core_sample_every: 5
+  swing_sample_every: 3
+  n_estimators: 300
+  learning_rate: 0.03
+  num_leaves: 15
+  min_child_samples: 200
+  subsample: 0.8
+  colsample_bytree: 0.8
+  reg_lambda: 1.0
+  n_jobs: 4
+
+validation:
+  holdout_years: 2                # metrics are reported separately for the final N years
+  n_trials: 1                     # number of configurations you have tried (for Deflated Sharpe)
+  bootstrap_reps: 1000
+
+tax:                              # India listed equity, FY 2024-25 onwards (approximate)
+  stcg_rate: 0.20
+  ltcg_rate: 0.125
+  ltcg_exemption: 125000
+
+paper:
+  db_path: state/paper.db
+  min_days_before_promotion: 126  # champion/challenger: ~6 months of paper trading before any switch
+  promotion_confidence: 0.95      # deflated probability the challenger truly beats the champion
+
+logging:
+  dir: logs
+  trial_log: state/trials.csv     # every backtest is recorded here -> automatic n_trials for Deflated Sharpe
