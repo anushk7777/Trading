@@ -247,9 +247,11 @@ b.className='pill'+(S.broker!=='manual'&&!S.dry_run?' live':'');
 document.getElementById('ai').textContent=S.reviewer.enabled?`AI reviewer: ${S.reviewer.model} · $${S.ai_cost_usd.last_day_usd} today`:'AI reviewer off';
 const kb=document.getElementById('killBtn');kb.textContent=S.kill?'RESUME trading':'STOP ALL';kb.className=S.kill?'ok big':'danger big';
 const rb=document.getElementById('refreshBtn');rb.disabled=S.busy;rb.textContent=S.busy?'Refreshing…':'Refresh plan';
-document.getElementById('banner').innerHTML=(S.kill?'<div class="alert kill">KILL SWITCH ON - no new buys will be proposed or sent. Protective stops remain active.</div>':'')+(S.error?`<div class="alert kill">${esc(S.error)}</div>`:'');
+const dr=S.drift||{};const drift=(dr.status==='below'||dr.status==='above')?`<div class="alert ${dr.status==='below'?'kill':''}">${esc(dr.message)}</div>`:'';
+document.getElementById('banner').innerHTML=drift+(S.kill?'<div class="alert kill">KILL SWITCH ON - no new buys will be proposed or sent. Protective stops remain active.</div>':'')+(S.error?`<div class="alert kill">${esc(S.error)}</div>`:'');
 const sl=Object.entries(S.sleeves).map(([k,v])=>`<div class="kpi"><span class="muted">${esc(k)}</span><b>${inr(v.equity)}</b><span class="muted">cash ${inr(v.cash)}${v.halted?' · HALTED':''}${v.loss_streak?` · loss streak ${v.loss_streak}`:''}</span></div>`).join('');
-document.getElementById('kpis').innerHTML=`<div class="kpi"><span class="muted">Total equity</span><b>${inr(S.equity)}</b><span class="muted">start ${inr(S.capital)}</span></div>`+sl;
+const tc=S.tca||{};const tcHtml=tc.n?`<div class="kpi"><span class="muted">Execution cost (${tc.n} fills)</span><b>${tc.median_bps.toFixed(1)} bps</b><span class="muted">model ${tc.model_bps.toFixed(1)} bps</span></div>`:'';
+document.getElementById('kpis').innerHTML=`<div class="kpi"><span class="muted">Total equity</span><b>${inr(S.equity)}</b><span class="muted">start ${inr(S.capital)}</span></div>`+sl+tcHtml+(dr.message?`<div class="kpi" style="max-width:420px"><span class="muted">Live vs backtest</span><span class="note">${esc(dr.message)}</span></div>`:'');
 document.getElementById('alerts').innerHTML=(S.alerts||[]).map(a=>`<div class="alert">${esc(a)}</div>`).join('');
 const P=S.proposals;document.getElementById('plan').innerHTML=!P.length?'<div class="empty">No orders proposed. Press “Refresh plan” after the market closes.</div>':
 `<table class="resp"><tr class="head"><th>Sleeve</th><th>Order</th><th class="num">Qty</th><th class="num">Limit</th><th class="num">Stop-loss</th><th class="num">Target</th><th class="num">Risk</th><th>Why</th><th>Check</th><th>Action</th></tr>`+

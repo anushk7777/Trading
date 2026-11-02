@@ -35,6 +35,7 @@ from ..backtest.runner import build_strategies
 from ..execution.brokers import make_broker
 from ..execution.market import round_tick
 from ..execution.risk_checks import pre_trade_checks
+from .corporate_actions import reconcile
 
 log = logging.getLogger(__name__)
 
@@ -227,9 +228,15 @@ class TradeDesk:
             acct = accounts.get(name)
             if acct is None:
                 continue
+            for ev in reconcile(acct, data):
+                alerts.append(f"{name}/{ev['message']}")
+                self.store.event("corporate_action", sleeve=name, **ev)
+                if ev["kind"] == "split" and ev["symbol"] in acct.positions:
+                    alerts.append(self._reprotect(name, ev["symbol"], acct.positions[ev["symbol"]], "corporate action"))
             for sym, pos in acct.positions.items():
                 if not np.isnan(close.get(sym, np.nan)):
                     pos.last_price = float(close[sym])
+                    pos.last_date = day
             equity = acct.equity(close)
             acct.peak_equity = max(acct.peak_equity, equity)
             with self.store.conn() as c:
@@ -606,7 +613,26 @@ class TradeDesk:
             "equity": round(sum(s["equity"] for s in sleeves.values()), 0), "sleeves": sleeves,
             "proposals": props, "positions": positions, "events": events, "ai_cost_usd": cost,
             "reviewer": {"enabled": bool(self.cfg.reviewer.enabled), "model": self.cfg.reviewer.model},
+            "drift": self.drift(), "tca": self.tca()[1],
         }
+
+    # ------------------------------------------------------------------ monitoring
+    def equity_series(self) -> pd.Series:
+        with self.store.conn() as c:
+            rows = c.execute("SELECT date, SUM(equity) AS eq FROM equity GROUP BY date ORDER BY date").fetchall()
+        return pd.Series([r["eq"] for r in rows], index=pd.to_datetime([r["date"] for r in rows]), dtype=float)
+
+    def drift(self) -> dict:
+        from ..research.expectations import check, load
+
+        return check(self.equity_series(), load(self.cfg.logging.expectations_file))
+
+    def tca(self, data=None) -> tuple[pd.DataFrame, dict]:
+        from .tca import shortfall_table, summary
+
+        fills = pd.DataFrame(self.store.proposals("status='filled' AND fill_price IS NOT NULL"))
+        table = shortfall_table(fills, data) if len(fills) else fills
+        return table, summary(table, float(self.cfg.costs.slippage_bps))
 
     # ------------------------------------------------------------------ journal
     def settle_journal(self, data) -> pd.DataFrame:

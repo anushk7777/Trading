@@ -22,8 +22,12 @@ def load_market_data(cfg, as_of=None, refresh: bool = False) -> MarketData:
             n_stocks=int(s.n_stocks), n_days=int(s.n_days), start=str(s.start),
             seed=int(cfg.general.seed), alpha_strength=float(s.alpha_strength),
         )
+    elif src == "nse":
+        data = _load_nse(cfg, refresh=refresh)
     else:
         data = _load_real(cfg, refresh=refresh)
+    if src != "synthetic" and cfg.data.extra_benchmarks:
+        data.extra_benchmarks = _extra_benchmarks(cfg, data.dates, refresh)
     if as_of is not None:
         data = data.truncate(as_of)
     if cfg.general.end:
@@ -84,3 +88,75 @@ def _load_real(cfg, refresh: bool) -> MarketData:
         membership=membership, fundamentals=fundamentals, source=cfg.data.source,
         survivorship_free=survivorship_free,
     )
+
+
+def _load_nse(cfg, refresh: bool) -> MarketData:
+    """Survivorship-free panel from NSE bhavcopies (see data/nse_bhavcopy.py)."""
+    from .nse_bhavcopy import load_nse_panel
+
+    panel = load_nse_panel(cfg, refresh=refresh)
+    fr = panel["frames"]
+    frames = clean_prices({k: fr[k] for k in ("open", "high", "low", "close", "volume")})
+    calendar = frames["close"].index
+    notes = [f"Survivorship-free NSE bhavcopy data: {frames['close'].shape[1]} symbols ever listed, "
+             f"{len(panel['actions'])} split/bonus adjustments (review {panel['actions_log']}), "
+             f"{len(panel['renames'])} symbol renames stitched."]
+    if not panel["dividends_included"]:
+        notes.append("Bhavcopy prices exclude dividends (no nse.dividends_file): strategy returns are understated "
+                     "by roughly the market dividend yield (~1-1.5%/yr) relative to a total-return benchmark.")
+
+    start, end = str(cfg.general.start), cfg.general.end
+    bench_syms = list(dict.fromkeys([cfg.data.benchmark, cfg.data.regime_index]))
+    recs = {}
+    try:
+        from .yahoo import download_prices
+
+        recs = download_prices(bench_syms, start, end, cfg.data.cache_dir,
+                               max_age_hours=float(cfg.data.cache_max_age_hours), refresh=refresh)
+    except Exception as exc:  # benchmark is optional for loading; fall back below
+        log.warning("Benchmark download failed: %s", exc)
+    member = panel["membership"]
+    ew = frames["close"].pct_change(fill_method=None).where(member).mean(axis=1).fillna(0.0)
+    ew_index = (1 + ew).cumprod() * 1000
+    bench = recs[cfg.data.benchmark]["Close"] if cfg.data.benchmark in recs else None
+    index = recs[cfg.data.regime_index]["Close"] if cfg.data.regime_index in recs else None
+    if bench is None or index is None:
+        notes.append("Benchmark/index unavailable from Yahoo - using an equal-weight index of the point-in-time "
+                     "universe instead (price-only).")
+    bench = ew_index if bench is None else bench.reindex(calendar).ffill()
+    index = ew_index if index is None else index.reindex(calendar).ffill()
+
+    sectors = _nse_sectors(cfg, list(frames["close"].columns))
+    log.info("NSE panel: %d symbols x %d days (%s to %s)", frames["close"].shape[1], len(calendar),
+             calendar[0].date(), calendar[-1].date())
+    return MarketData(open=frames["open"], high=frames["high"], low=frames["low"], close=frames["close"],
+                      volume=frames["volume"], benchmark=bench, index=index, sectors=sectors, membership=member,
+                      source="nse", survivorship_free=True, notes=notes)
+
+
+def _nse_sectors(cfg, symbols: list[str]) -> pd.Series:
+    from pathlib import Path
+
+    if cfg.nse.sector_file and Path(cfg.nse.sector_file).exists():
+        df = pd.read_csv(cfg.nse.sector_file)
+        df.columns = [c.lower().strip() for c in df.columns]
+        return pd.Series(df["sector"].to_numpy(), index=df["symbol"].astype(str)).reindex(symbols).fillna("Unknown")
+    try:
+        from .universe import fetch_index_constituents
+
+        u = fetch_index_constituents("nifty500", cfg.data.cache_dir)
+        return pd.Series(u["Industry"].to_numpy(), index=u["Symbol"]).reindex(symbols).fillna("Unknown")
+    except Exception:
+        return pd.Series("Unknown", index=symbols, dtype=object)
+
+
+def _extra_benchmarks(cfg, calendar, refresh: bool) -> dict:
+    try:
+        from .yahoo import download_prices
+
+        recs = download_prices(list(cfg.data.extra_benchmarks), str(cfg.general.start), cfg.general.end,
+                               cfg.data.cache_dir, max_age_hours=float(cfg.data.cache_max_age_hours), refresh=refresh)
+    except Exception as exc:
+        log.warning("Extra benchmarks unavailable: %s", exc)
+        return {}
+    return {k: v["Close"].reindex(calendar).ffill() for k, v in recs.items()}

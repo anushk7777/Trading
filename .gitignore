@@ -10,6 +10,7 @@ dist/
 # generated data and outputs
 data/cache/
 data/sentiment/
+data/nse/
 output/
 state/
 logs/

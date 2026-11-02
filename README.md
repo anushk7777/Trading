@@ -30,19 +30,24 @@ paper-trading ledger — so live signals are exactly what the backtest would hav
 ### The pipeline
 
 ```
-NSE universe (NIFTY 500 list, point-in-time membership if you have it)
+NSE universe: exchange bhavcopies incl. delisted stocks → point-in-time top-500 by traded value
+              (or the current NIFTY 500 list via Yahoo, with a survivorship warning)
   └─ liquidity filter (price, 63-day ADV ≥ ₹5 cr, ≥300 days history)
       ├─ CORE: factors → cross-sectional ranks → composite score
       │        (+ walk-forward LightGBM ranker, purged & embargoed)
-      │        → top-N with rank buffer → inverse-vol weights, 8% name cap, 25% sector cap
+      │        → optimizer: Grinold alpha (realised IC × vol × z) × Ledoit-Wolf risk × trading costs
+      │          (cvxpy; long-only, 8% name cap, 25% sector cap; heuristic fallback)
       │        → vol target 15%, market-regime filter, risk governor
       └─ SWING: candidate = model's expected R-multiple after costs ≥ 0.10
                (LightGBM trained on triple-barrier outcomes matching the exact trade rules)
                → 13 veto filters ("reasons NOT to trade") → risk-per-trade sizing
                → 2-ATR stop / 3-ATR target / 15-day time stop / break-even stop
-  └─ engine: orders decided at close t, filled at OPEN t+1, integer shares,
+  └─ engine: orders decided at close t, filled at OPEN t+1, integer shares, no fills on
+             price-band (circuit) locks, ≤10% of the day's volume per order,
              STT + stamp + exchange + SEBI + GST + DP charges + square-root impact slippage
-  └─ report: net-of-cost metrics, benchmark, deflated Sharpe, null test, holdout, tax estimate
+  └─ report: net-of-cost metrics, benchmark, deflated Sharpe, null test, holdout, tax estimate,
+             factor attribution, crisis stress tests; `sweep` adds PBO
+  └─ live:   corporate-action reconciliation, TCA vs model costs, drift vs backtest expectations
 ```
 
 ---
@@ -60,8 +65,13 @@ has a specific defence here:
 | **Selection bias** ("try 50 variants, show the best") | Every backtest is written to a **trial log**; the **Deflated Sharpe Ratio** automatically uses the true number of configurations you have tried on that data. |
 | **Luck** | Probabilistic & deflated Sharpe, block-bootstrap Sharpe confidence interval, alpha t-stat, and a **random-signal null test** (`--null-test 19`): the same rules with random stock picks — if random picks do as well, your signal adds nothing. |
 | **Overfitting** | Results are split into *development* and an untouched final *holdout* period; the report warns when the holdout degrades. `indquant sweep` shows parameter sensitivity — prefer flat regions. |
-| **Survivorship bias** | Supports a point-in-time constituents file. Without one, every report carries a prominent warning that history is overstated. |
-| **Ignoring costs** | Indian delivery charges and market impact are modelled on every fill; reports show cost drag and turnover. |
+| **Survivorship bias** | `data.source: nse` builds history from the exchange's daily bhavcopies, which include every stock that traded, delisted or not. The universe is chosen point-in-time (monthly top-N by traded value), never from today's index list. Yahoo runs carry a prominent warning. |
+| **Corporate actions** | Splits and bonuses are back-adjusted from the exchange's own adjusted previous close, with a clean-ratio gap detector as fallback and a user override file. Symbol renames are stitched by ISIN, and every adjustment is logged. `indquant data-audit` cross-checks against Yahoo. Live and paper books reconcile splits, bonuses and dividends automatically. |
+| **Unrealistic fills** | No buys on a stock locked at its upper circuit and no sells (including stops) at a lower-circuit lock. Orders are capped at 10% of the day's volume, with the remainder carried over. |
+| **Ignoring costs** | Indian delivery charges and market impact are modelled on every fill; reports show cost drag and turnover. Live **TCA** compares your real fills with the model and tells you when to raise `slippage_bps`. |
+| **Factor beta sold as alpha** | **Factor attribution** regresses returns on market, momentum, low-vol and size (plus value/quality when available). A warning fires when the edge disappears after these, and `data.extra_benchmarks` compares against factor ETFs directly. |
+| **Picking the best backtest** | `indquant sweep` reports the **Probability of Backtest Overfitting** (CSCV): how often the in-sample winner lands below median out of sample. |
+| **Edge decay after going live** | Each backtest saves its distribution of 21–252-day returns. The console and `paper-report` raise a **drift alert** when live results fall below the backtest's 5th percentile. |
 | **Pure-noise sanity** | Integration tests run the full pipeline on a synthetic **random walk** and assert that it does *not* find significant alpha, and on a market with planted momentum and assert that it does. |
 
 ## Reasons *not* to trade (swing veto filters)
@@ -102,11 +112,11 @@ actually predicts returns before giving it more weight.
 git clone <this repo> && cd Trading
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -e ".[dev,ai]"          # add ",kite" for the optional Zerodha adapter
-pytest                                                  # 66 tests, ~40 s
+pytest                                                  # 88 tests, ~60 s
 ```
 
-Python ≥ 3.10. Dependencies: numpy, pandas, scipy, scikit-learn, lightgbm, yfinance, pyyaml,
-matplotlib, pyarrow.
+Python ≥ 3.10. Dependencies: numpy, pandas, scipy, scikit-learn, lightgbm, cvxpy, yfinance,
+pyyaml, matplotlib, pyarrow.
 
 ## Quick start
 
@@ -117,17 +127,19 @@ indquant --source synthetic backtest --with-research --null-test 19
 # -> output/backtest/<timestamp>/report.html
 ```
 
-**2. Real NSE data (Yahoo Finance, free):**
+**2. Real NSE data, survivorship-free (recommended for research, free):**
 
 ```bash
-indquant fetch                                   # NIFTY 500 list from NSE + prices (cached)
-indquant healthcheck                             # data quality
-indquant research                                # factor ICs vs. hypotheses
-indquant backtest --with-research --null-test 19 # full report
-indquant sweep --param core.top_n --values 15,25,40   # sensitivity (counts as trials)
+indquant --source nse fetch          # daily NSE bhavcopies since general.start (~250 files/year, cached)
+indquant --source nse data-audit     # cross-check vs Yahoo; review data/nse/corporate_actions_detected.csv
+indquant --source nse research       # factor ICs vs. hypotheses
+indquant --source nse backtest --with-research --null-test 19
+indquant --source nse sweep --param core.top_n --values 15,25,40   # sensitivity + PBO
 ```
 
-Faster first run on a smaller universe: `--set data.universe=nifty100`.
+The first download takes a while (it is polite to NSE). Set `data.source: nse` in your
+config to make it the default. Quick alternative using Yahoo (faster, but survivorship-biased):
+`indquant fetch && indquant backtest`, or `--set data.universe=nifty100` for a smaller first run.
 
 **3. Paper trade before risking money:**
 
@@ -267,9 +279,11 @@ hypothesis and tested by `indquant research` like any other factor:
 2. `indquant backtest --null-test 19` on real data — require: positive excess CAGR after
    costs, deflated Sharpe ≥ 0.95 with your real trial count, null-test p < 0.05, and a
    holdout that is not dramatically worse than development.
-3. Get survivorship-free data (point-in-time constituents) and re-check — free-data
-   backtests are optimistic.
-4. Paper trade ≥ 6 months. Live paper results should be in the range the backtest implied.
+3. Use survivorship-free data (`--source nse`) and check `data-audit`. Yahoo-only
+   backtests are optimistic. The factor-attribution alpha should still be positive, and the
+   strategy should beat any factor ETF you list in `data.extra_benchmarks`.
+4. Paper trade ≥ 6 months. Live paper results should stay inside the backtest's range (no
+   drift alert), and TCA costs should match the model.
 5. Only then trade small real size through the Trade Desk (`indquant console`).
    Keep paper-trading the same variant alongside as the reference.
 
@@ -283,9 +297,9 @@ Everything is in `config/default.yaml` (commented). Override with your own YAML
 (`--config my.yaml`, merged over defaults) or inline `--set section.key=value`.
 Unknown keys are rejected so typos never silently fall back to defaults.
 
-Key sections: `data`, `universe_filter`, `costs`, `allocation`, `core`, `swing`
-(+ `swing.filters`), `risk`, `governor`, `sentiment`, `events`, `healthcheck`, `ml`,
-`validation`, `tax`, `paper`, `logging`.
+Key sections: `data`, `nse`, `universe_filter`, `costs`, `allocation`, `core` (+ `core.optimizer`),
+`swing` (+ `swing.filters`), `risk`, `governor`, `reviewer`, `execution`, `desk`, `sentiment`,
+`events`, `healthcheck`, `ml`, `validation`, `tax`, `paper`, `logging`.
 
 ### Optional data files
 
@@ -296,6 +310,42 @@ Key sections: `data`, `universe_filter`, `costs`, `allocation`, `core`, `swing`
 | `sentiment.file` | `symbol,timestamp,score` (publication time, IST) | point-in-time sentiment for backtests |
 | `events.file` | `symbol,date[,type]` | results-date blackout for swing entries |
 | `data.source=csv` + `data.csv_dir` | one `SYMBOL.csv` per stock: `Date,Open,High,Low,Close,Volume` (adjusted) | paid / self-built data |
+| `nse.corporate_actions_file` | `symbol,ex_date,factor` (price multiplier for earlier prices, e.g. 0.5 for 1:1 bonus; 1 cancels a false detection) | fix any adjustment flagged by `data-audit` |
+| `nse.dividends_file` | `symbol,ex_date,amount` | total-return prices for the NSE source |
+| `nse.sector_file` | `symbol,sector` | sectors for historical / delisted names |
+| `data.extra_benchmarks` | list of Yahoo tickers | factor / smart-beta ETFs the strategy must beat |
+
+## Portfolio construction: optimizer
+
+The core sleeve is built by a mean-variance optimizer, the standard tool of institutional
+equity desks:
+
+`maximise α'w − λ·w'Σw − c·|w − w_now|`, long-only, fully invested within the equity budget,
+with name and sector caps and a name limit.
+
+* **α (Grinold):** `IC × volatility × z-score`. The IC is the score's *realised* trailing
+  information coefficient (only ICs fully observable at the decision date are used). A signal
+  that stops working shrinks its own alphas, and the optimizer then trades less.
+* **Σ:** Ledoit-Wolf shrinkage covariance.
+* **c:** the Indian round-trip charges plus spread. The book only changes when the expected
+  gain beats the cost.
+
+The market-exposure decision (vol target, regime filter, governor) stays a separate layer
+above the optimizer. Set `core.construction: heuristic` for the simpler top-N / inverse-vol
+method. On synthetic markets with a real planted signal, the optimizer captured more alpha
+than the heuristic. With no signal it traded about 40–50% less and still found no false alpha.
+
+## Live monitoring
+
+* `indquant desk tca`: implementation shortfall of every real fill against the next
+  session's open (the price the backtest assumes) and against the signal-day close. It
+  recommends a new `costs.slippage_bps` once 20+ fills show costs above the model.
+* **Drift monitor:** after each backtest, the bootstrap distribution of 21/63/126/252-day
+  returns is saved. The console and `paper-report` compare live results with it and flag
+  results below the 5th percentile ("edge may have decayed — pause and re-validate").
+* **Corporate actions:** desk and paper books detect splits, bonuses and dividends from the
+  adjusted price history. Share counts, cost lots and stop/target levels are rescaled, and
+  dividends are credited. The console tells you to update the GTT at your broker.
 
 ## India-specific modelling
 
@@ -306,7 +356,8 @@ Key sections: `data`, `universe_filter`, `costs`, `allocation`, `core`, `swing`
   FIFO lots, giving an approximate post-tax CAGR.
 * **Benchmark**: NIFTYBEES (Nifty 50 ETF, dividend-adjusted) — an investable alternative.
 * **Execution**: decisions at the close, orders for the next open (AMO-friendly), integer
-  shares, positions in stocks that stop trading are closed after 10 sessions.
+  shares, no fills on a side locked at its price band (circuit), at most 10% of a day's
+  volume per order, positions in stocks that stop trading are closed after 10 sessions.
 * **Regulation**: this project never places orders. SEBI's 2025 framework for retail
   algorithmic trading routes automated API order placement through broker-approved,
   registered algos; read it before automating anything.
@@ -316,14 +367,15 @@ Key sections: `data`, `universe_filter`, `costs`, `allocation`, `core`, `swing`
 ```
 config/default.yaml          all parameters
 src/indquant/
-  data/        yahoo, csv, synthetic market, universe & liquidity, fundamentals, sentiment, events
+  data/        NSE bhavcopy (survivorship-free), yahoo, csv, synthetic, universe, fundamentals, sentiment,
+               events, cross-source audit
   features/    factors (momentum, residual momentum, low-vol, beta, reversal, trend, 52w-high), technicals, preprocessing
-  research/    factor IC / quantile analysis, hypotheses registry, trial log, random-signal null test
+  research/    factor IC / quantile analysis, hypotheses registry, trial log, null test, PBO, backtest expectations
   models/      labels (forward-rank, triple-barrier), purged walk-forward validation, LightGBM ranker
-  portfolio/   selection & caps, covariance / vol target / regime, risk governor
+  portfolio/   cvxpy optimizer, selection & caps, covariance / vol target / regime, risk governor
   strategies/  factor_portfolio (core), swing
-  backtest/    costs, account, engine, metrics, runner, HTML report
-  live/        healthcheck, signal generation, SQLite paper book (champion/challenger), trade desk, web console
+  backtest/    costs, account, engine, metrics, runner, factor attribution, stress tests, HTML report
+  live/        healthcheck, signals, paper book, trade desk, web console, corporate actions, TCA
   execution/   broker adapters (manual, Zerodha Kite), NSE clock, pre-trade risk checks
   review/      AI red-flag reviewer (Claude), point-in-time company news, prompt-injection guard
   cli.py       `indquant` command
@@ -333,7 +385,12 @@ tests/         unit, look-ahead, integration, live/paper/CLI tests
 ## Known limitations
 
 * Free Yahoo data has gaps, occasional bad ticks (basic cleaning is applied) and no delisted
-  stocks. Results on it are optimistic.
+  stocks. Results on it are optimistic; prefer `--source nse`.
+* The NSE source assumes the exchange's previous close reflects split/bonus adjustments. A
+  clean-ratio gap detector backs this up, but `data-audit` remains the check. The bhavcopy
+  parser was built from the published file layouts and tested on synthetic files in both
+  formats; run `data-audit` after your first real download. Dividends are excluded unless you
+  supply `nse.dividends_file`.
 * Fundamentals are only usable from a point-in-time file you supply.
 * The news word list is simple and headline-to-company matching is heuristic; treat
   sentiment as a veto until your own collected history proves it predicts returns.

@@ -29,6 +29,8 @@ class MarketData:
     fundamentals: dict[str, pd.DataFrame] = field(default_factory=dict)
     source: str = "unknown"
     survivorship_free: bool = False
+    notes: list = field(default_factory=list)   # data caveats surfaced in reports
+    extra_benchmarks: dict = field(default_factory=dict)  # e.g. factor ETFs to compare against
 
     def __post_init__(self) -> None:
         idx = self.close.index
@@ -64,7 +66,8 @@ class MarketData:
             benchmark=self.benchmark.loc[sl], index=self.index.loc[sl], sectors=self.sectors,
             membership=None if self.membership is None else self.membership.loc[sl],
             fundamentals={k: v.loc[sl] for k, v in self.fundamentals.items()},
-            source=self.source, survivorship_free=self.survivorship_free,
+            source=self.source, survivorship_free=self.survivorship_free, notes=list(self.notes),
+            extra_benchmarks=dict(self.extra_benchmarks),
         )
 
     def select(self, symbols: list[str]) -> "MarketData":
@@ -74,7 +77,8 @@ class MarketData:
             benchmark=self.benchmark, index=self.index, sectors=self.sectors.reindex(symbols),
             membership=None if self.membership is None else self.membership[symbols],
             fundamentals={k: v.reindex(columns=symbols) for k, v in self.fundamentals.items()},
-            source=self.source, survivorship_free=self.survivorship_free,
+            source=self.source, survivorship_free=self.survivorship_free, notes=list(self.notes),
+            extra_benchmarks=dict(self.extra_benchmarks),
         )
 
 

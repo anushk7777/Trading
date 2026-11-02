@@ -11,8 +11,10 @@ import math
 
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
 
 from ..backtest.account import Order
+from ..backtest.costs import CostModel
 from ..data.universe import eligibility_mask
 from ..features.factors import compute_factors
 from ..features.preprocessing import combine, cs_rank
@@ -23,7 +25,7 @@ from ..models.ml_ranker import WalkForwardModel
 from ..portfolio.construction import apply_caps, raw_weights, select_with_buffer
 from ..portfolio import governor
 from ..portfolio.risk import portfolio_vol, regime_is_risk_on, vol_target_multiplier
-from ..research.factor_analysis import forward_returns, trailing_ic_weights
+from ..research.factor_analysis import forward_returns, rowwise_spearman, trailing_ic_weights
 from ..research.hypotheses import unsupported_factors
 
 log = logging.getLogger(__name__)
@@ -88,6 +90,12 @@ class FactorPortfolioStrategy:
         rets = data.close.pct_change(fill_method=None)
         self.returns = rets
         self.vol_ann = rets.rolling(63, min_periods=40).std() * math.sqrt(252)
+        self.score_ic = None
+        if c.construction == "optimizer":
+            # realised IC of the final score: the IC measured at s is only known at s+h+1
+            h = int(cfg.ml.core_horizon)
+            ic = rowwise_spearman(self.score, forward_returns(data, h), self.mask)
+            self.score_ic = ic.shift(h + 1).rolling(504, min_periods=63).mean()
 
     def _fit_ml(self, data) -> pd.DataFrame:
         cfg = self.cfg
@@ -116,9 +124,15 @@ class FactorPortfolioStrategy:
         scores = self.score.iloc[i]
         scores = scores[self.mask.iloc[i]].dropna()
         held = list(account.positions)
-        selection = select_with_buffer(scores, held, int(c.top_n), float(c.buffer_mult))
-        w = raw_weights(selection, self.vol_ann.iloc[i], c.weighting)
-        w = apply_caps(w, float(c.max_weight), float(c.sector_cap) if c.sector_cap else None, self.data.sectors)
+        w, opt_info = None, {}
+        if c.construction == "optimizer":
+            w, opt_info = self._optimize(i, account, equity, scores)
+        if w is None:
+            selection = select_with_buffer(scores, held, int(c.top_n), float(c.buffer_mult))
+            w = raw_weights(selection, self.vol_ann.iloc[i], c.weighting)
+            w = apply_caps(w, float(c.max_weight), float(c.sector_cap) if c.sector_cap else None, self.data.sectors)
+            if c.construction == "optimizer":
+                opt_info["fallback"] = "heuristic"
 
         exposure = 1.0 - float(c.cash_buffer)
         lookback = int(risk.vol_lookback)
@@ -138,8 +152,46 @@ class FactorPortfolioStrategy:
                 "governor_mult": gov_mult,
                 "governor": "; ".join(gov.reasons) if gov is not None else "",
                 "exposure": exposure * float(w.sum()),
-                "ml_active": bool(self.ml_score is not None and self.ml_score.iloc[i].notna().any())}
+                "ml_active": bool(self.ml_score is not None and self.ml_score.iloc[i].notna().any()),
+                **{f"opt_{k}": v for k, v in opt_info.items()}}
         return w * exposure, info
+
+    def _optimize(self, i: int, account, equity: float, scores: pd.Series):
+        """Alpha (Grinold) x risk (Ledoit-Wolf) x costs, solved with cvxpy."""
+        from ..portfolio.optimizer import optimize_weights
+        from ..portfolio.risk import ledoit_wolf_cov
+
+        c, o = self.c, self.c.optimizer
+        if len(scores) < 5:
+            return None, {"status": "too few names"}
+        h = int(self.cfg.ml.core_horizon)
+        cand = list(scores.sort_values(ascending=False).index[: int(int(c.top_n) * float(o.candidate_mult))])
+        cand += [s_ for s_ in account.positions if s_ in scores.index and s_ not in cand]
+        pct = (scores.reindex(cand) + 0.5).clip(0.005, 0.995)
+        z = pd.Series(norm.ppf(pct.to_numpy()), index=cand)
+        ic = self.score_ic.iloc[i] if self.score_ic is not None else np.nan
+        ic = float(o.ic_prior) if np.isnan(ic) else float(np.clip(ic, float(o.ic_floor), float(o.ic_cap)))
+        sigma = self.vol_ann.iloc[i].reindex(cand)
+        sigma = sigma.fillna(sigma.median()) * math.sqrt(h / 252)
+        alpha = ic * sigma * z
+        window = self.returns.iloc[max(0, i - int(o.cov_lookback) + 1): i + 1][cand]
+        cov = ledoit_wolf_cov(window) * h
+        if cov.empty:
+            return None, {"status": "no covariance"}
+        alpha = alpha.reindex(cov.index)
+        prices = self.data.close.ffill().iloc[i]
+        w0 = pd.Series({s_: p.shares * prices.get(s_, np.nan) / equity for s_, p in account.positions.items()})
+        cm = CostModel.from_config(self.cfg.costs)
+        tcost = (cm.proportional_rate("buy") + cm.slippage_bps / 1e4) * float(o.tcost_mult)
+        budget = 1.0 - float(c.cash_buffer)
+        w, info = optimize_weights(alpha, cov, w0.dropna(), self.data.sectors, max_weight=float(c.max_weight),
+                                   sector_cap=float(c.sector_cap) if c.sector_cap else None, budget=budget,
+                                   risk_aversion=float(o.risk_aversion), tcost=tcost,
+                                   min_weight=float(o.min_weight), max_names=int(o.max_names))
+        info["ic_used"] = ic
+        if w is None or w.sum() <= 0:
+            return None, info
+        return w / budget, info  # exposure scaling (cash buffer, vol target, regime) is applied by the caller
 
     def on_bar(self, i: int, ctx) -> list[Order]:
         account = ctx.account

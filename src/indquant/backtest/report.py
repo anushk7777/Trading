@@ -13,16 +13,18 @@ import pandas as pd
 
 from .metrics import drawdown_series, monthly_returns
 
-PCT_KEYS = {"total_return", "cagr", "volatility", "max_drawdown", "alpha", "benchmark_cagr", "benchmark_max_drawdown",
+PCT_KEYS = {"factor_alpha", "total_return", "cagr", "volatility", "max_drawdown", "alpha", "benchmark_cagr", "benchmark_max_drawdown",
             "excess_cagr", "annual_turnover", "annual_cost_drag", "win_rate", "post_tax_cagr_approx"}
 ROW_ORDER = ["start", "end", "final_equity", "total_return", "cagr", "volatility", "sharpe", "sharpe_ci_low",
              "sharpe_ci_high", "sortino", "max_drawdown", "calmar", "psr", "deflated_sharpe", "alpha", "alpha_tstat",
              "beta", "information_ratio", "excess_cagr", "benchmark_cagr", "annual_turnover", "annual_cost_drag",
-             "n_round_trips", "win_rate", "profit_factor", "avg_holding_days", "estimated_tax", "post_tax_cagr_approx"]
+             "n_round_trips", "win_rate", "profit_factor", "avg_holding_days", "estimated_tax", "post_tax_cagr_approx",
+             "factor_alpha", "factor_alpha_tstat"]
 LABELS = {"psr": "Prob. Sharpe > 0 (PSR)", "deflated_sharpe": "Deflated Sharpe (prob.)", "alpha": "Alpha (ann.)",
           "alpha_tstat": "Alpha t-stat", "excess_cagr": "CAGR vs benchmark", "annual_turnover": "Turnover / yr",
           "annual_cost_drag": "Cost + slippage drag / yr", "n_round_trips": "Closing trades",
-          "post_tax_cagr_approx": "Post-tax CAGR (approx.)", "estimated_tax": "Estimated tax (INR)"}
+          "post_tax_cagr_approx": "Post-tax CAGR (approx.)", "estimated_tax": "Estimated tax (INR)",
+          "factor_alpha": "Alpha after factors (ann.)", "factor_alpha_tstat": "Factor-adjusted alpha t-stat"}
 
 
 def _fmt(key: str, v) -> str:
@@ -103,7 +105,8 @@ def _charts(res) -> dict[str, str]:
 
 def _metrics_table(metrics: dict) -> str:
     cols = [c for c in ("total", "core", "swing", "benchmark", "development", "holdout") if c in metrics]
-    head = "".join(f"<th>{html.escape(c.title())}</th>" for c in cols)
+    cols += [c for c in metrics if c.startswith("bm:")]
+    head = "".join(f"<th>{html.escape(c[3:] if c.startswith('bm:') else c.title())}</th>" for c in cols)
     rows = []
     for key in ROW_ORDER:
         if not any(key in metrics[c] for c in cols):
@@ -190,6 +193,25 @@ def write_report(res, out_dir: str | Path, title: str = "indquant backtest", res
             parts.append(f"<img alt='{key} chart' src='data:image/png;base64,{charts[key]}'>")
     parts.append("<h2>Monthly returns (total)</h2><div class='scroll'>" + _monthly_table(res.equity["total"]) + "</div>")
 
+    att = getattr(res, "attribution", None) or {}
+    if att:
+        tbl = att["table"].copy()
+        tbl.index = [{"alpha": "Alpha (annualised)", "MKT": "Market beta", "MOM": "Momentum",
+                      "LOWVOL": "Low volatility", "SMB": "Size (small minus big)", "VALUE": "Value",
+                      "QUALITY": "Quality"}.get(i, i) for i in tbl.index]
+        parts.append("<h2>Factor attribution</h2><p class='muted'>Daily returns regressed on the market and on "
+                     "long-short factor portfolios from the same universe. Significant loadings mean part of the "
+                     f"return is a known factor premium. R² {att['r2']:.2f}, {att['n_obs']} days.</p>"
+                     + _df_table(tbl, float_fmt="{:.3f}"))
+    st = getattr(res, "stress", None) or {}
+    if st and len(st.get("historical", [])):
+        parts.append("<h2>Stress test: historical Indian market crises</h2>"
+                     + _df_table(st["historical"].set_index("event"),
+                                 pct_cols=("strategy", "benchmark", "strategy_max_dd")))
+    if st and len(st.get("hypothetical", [])):
+        parts.append("<h2>Stress test: shocks to the final portfolio</h2>"
+                     + _df_table(st["hypothetical"].set_index("scenario"), pct_cols=("portfolio_return",),
+                                 float_fmt="{:,.0f}"))
     if research is not None and not research.empty:
         parts.append("<h2>Factor research (rank IC, non-overlapping monthly samples)</h2><div class='scroll'>"
                      + _df_table(research, pct_cols=("pct_positive", "q_spread_ann", "top_q_ann")) + "</div>")

@@ -27,6 +27,7 @@ class Position:
     missing_days: int = 0
     last_price: float | None = None
     realized: float = 0.0  # realised P&L from partial exits of this position
+    last_date: str | None = None  # date of last_price (needed to reconcile corporate actions)
 
     @property
     def avg_cost(self) -> float:
@@ -119,6 +120,7 @@ def apply_buy(acct: "Account", symbol: str, shares: int, price: float, cost: flo
     pos.shares += shares
     pos.lots.append(Lot(date=day, shares=shares, cost=(value + cost) / shares))
     pos.last_price = price
+    pos.last_date = day
     trade = {"date": pd.Timestamp(date), "sleeve": acct.name, "symbol": symbol, "side": "buy", "shares": shares,
              "price": price, "value": value, "costs": cost, "slippage": slippage, "reason": reason,
              "pnl": None, "holding_days": None, "tax_lots": []}

@@ -38,6 +38,9 @@ class CostModel:
     slippage_bps: float = 5.0
     impact_coef: float = 0.1
     max_slippage: float = 0.02
+    max_participation: float = 0.10      # an order may trade at most this share of the day's volume
+    circuit_lock_tol: float = 0.001      # bar range below this fraction of price = frozen
+    circuit_band_min: float = 0.019      # smallest NSE price band (2%) - a frozen bar this far from prev close is locked
 
     @classmethod
     def from_config(cls, costs_cfg: dict) -> "CostModel":

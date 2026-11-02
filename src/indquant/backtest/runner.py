@@ -53,6 +53,8 @@ class BacktestResult:
     taxes: pd.Series
     exposure: pd.DataFrame
     warnings: list = field(default_factory=list)
+    attribution: dict = field(default_factory=dict)
+    stress: dict = field(default_factory=dict)
 
 
 def run_backtest(cfg, data, sleeves: tuple[str, ...] = ("core", "swing"), strategies: dict | None = None) -> BacktestResult:
@@ -94,6 +96,10 @@ def run_backtest(cfg, data, sleeves: tuple[str, ...] = ("core", "swing"), strate
         metrics[name] = summarize(eq[name], bench_scaled, rf, trades[trades["sleeve"] == name] if len(trades) else None,
                                   n_trials)
     metrics["benchmark"] = summarize(bench_scaled, None, rf)
+    for ticker, series in (getattr(data, "extra_benchmarks", None) or {}).items():
+        b = series.reindex(eq.index).ffill().dropna()
+        if len(b) > 60:
+            metrics[f"bm:{ticker}"] = summarize(b / b.iloc[0] * capital, None, rf)
 
     hy = float(cfg.validation.holdout_years)
     if hy > 0:
@@ -114,6 +120,21 @@ def run_backtest(cfg, data, sleeves: tuple[str, ...] = ("core", "swing"), strate
     result = BacktestResult(cfg=cfg.to_dict() if hasattr(cfg, "to_dict") else dict(cfg), start_date=eq.index[0],
                             equity=eq, benchmark=bench_scaled, trades=trades, metrics=metrics, accounts=accounts,
                             strategies=strategies, taxes=taxes, exposure=pd.DataFrame(exposure))
+    try:
+        from .attribution import attribute
+
+        result.attribution = attribute(eq["total"], data, cfg)
+    except Exception as exc:  # analytics must never break a backtest
+        log.warning("Factor attribution failed: %s", exc)
+    try:
+        from .stress import run as run_stress
+
+        result.stress = run_stress(result, data)
+    except Exception as exc:
+        log.warning("Stress test failed: %s", exc)
+    if result.attribution:
+        metrics["total"]["factor_alpha"] = result.attribution["alpha"]
+        metrics["total"]["factor_alpha_tstat"] = result.attribution["alpha_t"]
     result.warnings = build_warnings(cfg, data, result)
     return result
 
@@ -127,6 +148,7 @@ def build_warnings(cfg, data, res: BacktestResult) -> list[str]:
         w.append("SURVIVORSHIP BIAS: the universe is today's index constituents. Stocks that were dropped or "
                  "delisted in the past are missing, so historical returns are OVERSTATED. Supply "
                  "data.membership_file (point-in-time constituents) to fix this.")
+    w.extend(getattr(data, "notes", []) or [])
     for name, strat in res.strategies.items():
         model = getattr(strat, "ml_model", None)
         if cfg.ml.enabled:
@@ -151,6 +173,14 @@ def build_warnings(cfg, data, res: BacktestResult) -> list[str]:
     if "holdout" in res.metrics and res.metrics["holdout"]["sharpe"] < 0.5 * res.metrics["development"]["sharpe"]:
         w.append("HOLDOUT DEGRADATION: Sharpe in the final holdout period is less than half of the development "
                  "period - a classic sign of overfitting or a decaying edge.")
+    att = res.attribution
+    if att and m.get("alpha_tstat", 0) >= 2 and att["alpha_t"] < 2:
+        w.append(f"EDGE EXPLAINED BY FACTORS: alpha is significant vs the benchmark (t={m['alpha_tstat']:.2f}) but not "
+                 f"after controlling for momentum / low-vol / size exposures (t={att['alpha_t']:.2f}). A low-cost "
+                 "factor index fund may deliver most of this return.")
+    for k, v in res.metrics.items():
+        if k.startswith("bm:") and v.get("cagr", -1) > m.get("cagr", 0):
+            w.append(f"{k[3:]} returned {v['cagr']:.1%}/yr vs the strategy's {m['cagr']:.1%}/yr over the same period.")
     if int(cfg.validation.n_trials) <= 1:
         w.append("Set validation.n_trials to the number of parameter sets you have tried; every extra trial "
                  "raises the bar for significance (Deflated Sharpe).")

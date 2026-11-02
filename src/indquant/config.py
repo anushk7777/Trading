@@ -113,12 +113,14 @@ def validate(cfg: Config) -> None:
         raise ValueError("core.buffer_mult must be >= 1")
     if not 0 < cfg.core.max_weight <= 1:
         raise ValueError("core.max_weight must be in (0, 1]")
+    if cfg.core.construction not in ("optimizer", "heuristic"):
+        raise ValueError("core.construction must be 'optimizer' or 'heuristic'")
     if cfg.core.weighting not in ("equal", "inverse_vol"):
         raise ValueError("core.weighting must be 'equal' or 'inverse_vol'")
     if cfg.swing.stop_atr <= 0 or cfg.swing.target_atr <= 0:
         raise ValueError("swing.stop_atr and swing.target_atr must be positive")
-    if cfg.data.source not in ("yahoo", "csv", "synthetic"):
-        raise ValueError("data.source must be yahoo, csv or synthetic")
+    if cfg.data.source not in ("yahoo", "csv", "synthetic", "nse"):
+        raise ValueError("data.source must be yahoo, nse, csv or synthetic")
     if not 0 <= cfg.core.ml_weight <= 1:
         raise ValueError("core.ml_weight must be in [0, 1]")
 

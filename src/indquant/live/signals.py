@@ -16,6 +16,7 @@ from ..backtest.account import Account
 from ..backtest.costs import CostModel
 from ..backtest.engine import Engine
 from ..backtest.runner import build_strategies
+from .corporate_actions import reconcile
 from .healthcheck import Issue
 
 log = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ class SignalResult:
     equity: dict
     health: list[Issue] = field(default_factory=list)
     new_trades: list[dict] = field(default_factory=list)
+    corporate_actions: list[dict] = field(default_factory=list)
 
 
 def step_accounts(cfg, data, accounts: dict[str, Account] | None, capital: float, variant: str = "default",
@@ -43,7 +45,7 @@ def step_accounts(cfg, data, accounts: dict[str, Account] | None, capital: float
     engine = Engine(data, CostModel.from_config(cfg.costs), cash_yield=float(cfg.risk.cash_yield))
     accounts = dict(accounts or {})
     last = len(data.dates) - 1
-    equity, new_trades = {}, []
+    equity, new_trades, corporate = {}, [], []
     for name, strat in strategies.items():
         if not hasattr(strat, "data"):
             strat.prepare(data)
@@ -55,13 +57,16 @@ def step_accounts(cfg, data, accounts: dict[str, Account] | None, capital: float
             start = last
         else:
             start = int(data.dates.searchsorted(pd.Timestamp(acct.last_date), side="right"))
+            for ev in reconcile(acct, data):
+                corporate.append({"sleeve": name, **ev})
         acct.history, acct.trades = [], []
         for i in range(start, last + 1):
             engine.step(i, strat, acct)
         accounts[name] = acct
         equity[name] = acct.equity(engine.close_ff.iloc[last])
         new_trades += acct.trades
-    return SignalResult(variant, data.dates[last], accounts, strategies, equity, new_trades=new_trades)
+    return SignalResult(variant, data.dates[last], accounts, strategies, equity, new_trades=new_trades,
+                        corporate_actions=corporate)
 
 
 def dry_run(cfg, data, accounts: dict[str, Account] | None, capital: float, variant: str = "default") -> SignalResult:
@@ -120,6 +125,10 @@ def write_signal_files(res: SignalResult, out_dir: str | Path, mode: str) -> Pat
     lines += [f"- {k}: ₹{v:,.0f}" for k, v in res.equity.items()]
     lines.append("")
 
+    if res.corporate_actions:
+        lines.append("## Corporate actions applied")
+        lines += [f"- [{e['sleeve']}] {e['message']}" for e in res.corporate_actions]
+        lines.append("")
     for name, strat in res.strategies.items():
         gov = getattr(strat, "last_governor", None)
         if gov is not None and gov.reasons:

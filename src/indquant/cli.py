@@ -68,6 +68,37 @@ def cmd_fetch(args) -> int:
     return 0
 
 
+def cmd_data_audit(args) -> int:
+    from .data.audit import compare_sources, suspicious_moves
+    from .data.yahoo import download_prices
+
+    cfg = _cfg(args)
+    data = _load(cfg, args)
+    out = Path(cfg.general.output_dir) / "audit"
+    out.mkdir(parents=True, exist_ok=True)
+    moves = suspicious_moves(data.close, float(args.threshold))
+    moves.to_csv(out / "suspicious_moves.csv", index=False)
+    print(f"{len(moves)} single-day moves > {float(args.threshold):.0%} remain after adjustment "
+          f"(saved to {out / 'suspicious_moves.csv'}); check them for missed splits/bonuses.")
+    if data.source == "nse":
+        last = data.membership.iloc[-1] if data.membership is not None else data.close.iloc[-1].notna()
+        symbols = list(last[last].index[: int(args.symbols)])
+        recs = download_prices(symbols, str(cfg.general.start), cfg.general.end, cfg.data.cache_dir,
+                               max_age_hours=float(cfg.data.cache_max_age_hours))
+        table = compare_sources(data.close, {s: r["Close"] for s, r in recs.items()})
+        table.to_csv(out / "nse_vs_yahoo.csv", index=False)
+        if len(table):
+            bad = table[table["mismatch_days"] > 0]
+            print(f"\nNSE vs Yahoo on {len(table)} stocks: median return correlation "
+                  f"{table['return_corr'].median():.3f}; {len(bad)} stocks with mismatching days (>5%).")
+            with pd.option_context("display.width", 160, "display.max_colwidth", 60):
+                print(bad.head(20).to_string(index=False))
+            print("\nFix a wrong adjustment by adding a row to nse.corporate_actions_file (factor 1 cancels one).")
+        else:
+            print("No overlapping Yahoo data to compare against.")
+    return 0
+
+
 def cmd_research(args) -> int:
     from .data.universe import eligibility_mask
     from .features.factors import compute_factors
@@ -137,6 +168,10 @@ def cmd_backtest(args) -> int:
     path = write_report(res, out, title=f"indquant backtest ({data.source})", research=research)
     if not args.no_log:
         record_trial(cfg.logging.trial_log, plain, res.metrics, ",".join(_sleeves(args)), args.label or "")
+    from .research.expectations import build as build_expectations, save as save_expectations
+
+    save_expectations(cfg.logging.expectations_file, build_expectations(res.equity["total"].pct_change(fill_method=None)),
+                      {"config_hash": config_hash(plain), "source": data.source, "sleeves": ",".join(_sleeves(args))})
     _print_metrics(res.metrics)
     print("\n" + "\n".join(f"! {w}" for w in res.warnings))
     print(f"\nReport: {path}")
@@ -151,18 +186,29 @@ def cmd_sweep(args) -> int:
     data = _load(base, args)
     values = [parse_value(v) for v in args.values.split(",")]
     n = len(values)
-    rows = []
+    rows, curves = [], {}
     for v in values:
         cfg = base.copy_with({args.param: v, "validation.n_trials": max(n, int(base.validation.n_trials))})
         res = run_backtest(cfg, data, _sleeves(args))
         record_trial(cfg.logging.trial_log, cfg.to_dict(), res.metrics, ",".join(_sleeves(args)), f"sweep {args.param}")
         m = res.metrics["total"]
+        curves[str(v)] = res.equity["total"].pct_change(fill_method=None)
         rows.append({args.param: v, "cagr": m["cagr"], "sharpe": m["sharpe"], "max_dd": m["max_drawdown"],
                      "excess_cagr": m.get("excess_cagr"), "deflated_sharpe": m["deflated_sharpe"],
                      "turnover": m.get("annual_turnover")})
     df = pd.DataFrame(rows)
     with pd.option_context("display.float_format", "{:,.3f}".format):
         print(df.to_string(index=False))
+    if len(curves) >= 2:
+        from .research.overfitting import probability_of_backtest_overfitting
+
+        try:
+            pbo = probability_of_backtest_overfitting(pd.DataFrame(curves))
+            print(f"\nProbability of backtest overfitting (CSCV, {pbo['n_splits']} splits): {pbo['pbo']:.0%}. "
+                  f"Median out-of-sample Sharpe of the in-sample winner: {pbo['oos_sharpe_of_is_best']:.2f}.")
+            print("  PBO near 0% = choosing the best value is meaningful; >= 50% = it is no better than a coin flip.")
+        except ValueError as exc:
+            print(f"PBO not computed: {exc}")
     spread = df["sharpe"].max() - df["sharpe"].min()
     print(f"\nSharpe range across values: {spread:.2f}. A robust strategy should not depend sharply on one "
           "parameter; prefer a value in a flat region over the single best one.")
@@ -312,6 +358,13 @@ def cmd_paper_report(args) -> int:
         print(table.to_string() if len(table) else "No variants.")
     for n in notes:
         print("- " + n)
+    from .research.expectations import check, load as load_expectations
+
+    exp = load_expectations(cfg.logging.expectations_file)
+    for _, v in book.variants().iterrows():
+        eq = book.equity(v["name"])
+        if not eq.empty:
+            print(f"[{v['name']}] " + check(eq.ffill().sum(axis=1), exp)["message"])
     trades = book.trades()
     if len(trades):
         out = Path(cfg.general.output_dir) / "paper"
@@ -403,6 +456,20 @@ def cmd_desk(args) -> int:
     if a == "status":
         _print_plan(desk)
         return 0
+    if a == "tca":
+        try:
+            data = _load(cfg, args)
+        except Exception as exc:  # TCA vs signal close still works without data
+            log.warning("No market data for TCA vs open: %s", exc)
+            data = None
+        table, summ = desk.tca(data)
+        if len(table):
+            cols = [c for c in ("data_date", "symbol", "side", "fill_qty", "ref_price", "next_open", "fill_price",
+                                "vs_signal_close_bps", "vs_open_bps") if c in table]
+            with pd.option_context("display.width", 160, "display.float_format", "{:,.2f}".format):
+                print(table[cols].to_string(index=False))
+        print("\n" + summ["message"])
+        return 0
     if a == "journal":
         data = _load(cfg, args)
         print(desk.settle_journal(data).to_string(index=False) or "Nothing settled yet.")
@@ -464,12 +531,17 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="indquant", description="Systematic trading research for Indian equities")
     p.add_argument("--config", default=None, help="YAML config merged over config/default.yaml")
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="override a config value")
-    p.add_argument("--source", choices=["yahoo", "csv", "synthetic"], help="shortcut for --set data.source=...")
+    p.add_argument("--source", choices=["yahoo", "nse", "csv", "synthetic"], help="shortcut for --set data.source=...")
     p.add_argument("--as-of", dest="as_of", default=None, help="truncate data at this date (YYYY-MM-DD)")
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("fetch", help="download / refresh universe and prices").set_defaults(func=cmd_fetch)
+
+    da = sub.add_parser("data-audit", help="cross-check NSE vs Yahoo prices and flag suspicious moves")
+    da.add_argument("--symbols", type=int, default=100, help="number of liquid stocks to cross-check")
+    da.add_argument("--threshold", type=float, default=0.30)
+    da.set_defaults(func=cmd_data_audit)
 
     r = sub.add_parser("research", help="factor IC / quantile analysis checked against hypotheses")
     r.add_argument("--horizon", type=int, default=21)
@@ -534,7 +606,7 @@ def build_parser() -> argparse.ArgumentParser:
         x = dsub.add_parser(name)
         x.add_argument("--force", action="store_true")
         x.add_argument("--allow-intraday", action="store_true")
-    for name in ("status", "journal", "resume", "sync"):
+    for name in ("status", "journal", "resume", "sync", "tca"):
         dsub.add_parser(name)
     for name in ("approve", "skip", "fill", "cancel"):
         x = dsub.add_parser(name)

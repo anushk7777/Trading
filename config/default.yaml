@@ -11,7 +11,7 @@ general:
   output_dir: output
 
 data:
-  source: yahoo                   # yahoo | csv | synthetic
+  source: yahoo                   # yahoo | nse (survivorship-free, recommended for research) | csv | synthetic
   cache_dir: data/cache
   cache_max_age_hours: 12
   csv_dir: data/csv               # for source=csv: one <SYMBOL>.csv per stock (Date,Open,High,Low,Close,Volume)
@@ -21,11 +21,25 @@ data:
   fundamentals_file: null         # optional point-in-time fundamentals CSV (see README)
   benchmark: NIFTYBEES.NS         # investable total-return benchmark (Nifty 50 ETF, dividends adjusted)
   regime_index: ^NSEI             # index used for regime filter and beta
+  extra_benchmarks: []            # e.g. factor / smart-beta ETF tickers to beat (Yahoo symbols)
   synthetic:                      # only used when source=synthetic
     n_stocks: 150
     n_days: 2520
     start: "2015-01-01"
     alpha_strength: 1.0           # 0 = pure random walk (no edge exists)
+
+nse:                              # data.source=nse: exchange bhavcopies incl. delisted stocks
+  raw_dir: data/nse/raw
+  series: [EQ, BE]
+  universe_size: 500              # point-in-time universe: top-N by trailing traded value, monthly
+  universe_lookback: 126
+  min_listing_days: 252
+  ca_threshold: 0.03              # PREVCLOSE/CLOSE(t-1) deviation treated as a split/bonus
+  apply_gap_heuristic: true       # fallback: clean-ratio overnight gaps (1/2, 1/5 ...) with a volume jump
+  corporate_actions_file: null    # CSV symbol,ex_date,factor - overrides detection (factor 1 cancels one)
+  dividends_file: null            # CSV symbol,ex_date,amount - makes prices total-return
+  sector_file: null               # CSV symbol,sector - sectors for historical / delisted names
+  request_pause: 0.35             # seconds between downloads (be polite to NSE)
 
 universe_filter:
   min_price: 20.0                 # INR
@@ -46,6 +60,9 @@ costs:                            # Equity delivery (CNC) charges - verify with 
   slippage_bps: 5.0               # fixed half-spread assumption
   impact_coef: 0.1                # square-root market impact: coef * daily_vol * sqrt(order/ADV)
   max_slippage: 0.02
+  max_participation: 0.10         # trade at most 10% of a day's volume per order (rest carried to next day)
+  circuit_lock_tol: 0.001         # bar with (high-low) below 0.1% of price is "frozen"...
+  circuit_band_min: 0.019         # ...and if it moved >= 1.9% it was locked at an NSE price band: no fill
 
 allocation:                       # capital split between sleeves (must sum to <= 1)
   core: 0.7
@@ -53,6 +70,17 @@ allocation:                       # capital split between sleeves (must sum to <
 
 core:                             # multi-factor portfolio, monthly rebalance
   enabled: true
+  construction: optimizer         # optimizer: alpha x risk x costs (cvxpy) | heuristic: top-N, inverse-vol, caps
+  optimizer:
+    risk_aversion: 1.0            # lambda on horizon variance (fully invested; market exposure set by risk layer)
+    tcost_mult: 1.0               # cost penalty multiplier (higher = trade less)
+    candidate_mult: 3             # consider the top (top_n x this) names plus current holdings
+    min_weight: 0.01              # prune positions below 1%, then re-solve
+    max_names: 40
+    ic_prior: 0.04                # IC assumed until enough realised history exists
+    ic_floor: 0.005
+    ic_cap: 0.15
+    cov_lookback: 252
   top_n: 25
   buffer_mult: 1.6                # keep a holding while its rank <= top_n * buffer_mult (turnover control)
   weighting: inverse_vol          # equal | inverse_vol
@@ -220,3 +248,4 @@ paper:
 logging:
   dir: logs
   trial_log: state/trials.csv     # every backtest is recorded here -> automatic n_trials for Deflated Sharpe
+  expectations_file: state/expectations.json   # backtest return distribution used by the live drift monitor

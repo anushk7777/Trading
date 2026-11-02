@@ -52,6 +52,8 @@ def apply_caps(weights: pd.Series, max_weight: float, sector_cap: float | None =
         if sec is not None and sector_cap:
             sec_sum = w.groupby(sec).sum()
             for name, total in sec_sum.items():
+                if name == "Unknown":  # no sector data (e.g. delisted names) - not a real sector
+                    continue
                 members = sec.index[sec == name]
                 if total > sector_cap + 1e-12:
                     w[members] *= sector_cap / total

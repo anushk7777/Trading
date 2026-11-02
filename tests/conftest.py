@@ -26,6 +26,7 @@ def small_overrides(tmp_path=None, **extra):
             "paper.db_path": str(tmp_path / "state" / "paper.db"),
             "logging.dir": str(tmp_path / "logs"),
             "logging.trial_log": str(tmp_path / "state" / "trials.csv"),
+            "logging.expectations_file": str(tmp_path / "state" / "expectations.json"),
             "sentiment.history_file": str(tmp_path / "sentiment.csv"),
         })
     o.update(extra)

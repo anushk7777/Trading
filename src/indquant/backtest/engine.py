@@ -17,6 +17,7 @@ price it used to make its decision.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from typing import Protocol
 
 import numpy as np
@@ -65,6 +66,16 @@ class Engine:
         self.adv = (data.close * data.volume).rolling(21, min_periods=5).mean().to_numpy(dtype=float)
         self.dvol = data.close.pct_change(fill_method=None).rolling(21, min_periods=10).std().to_numpy(dtype=float)
         self.daily_yield = (1 + cash_yield) ** (1 / 252) - 1
+        self.day_str = [str(d.date()) for d in self.dates]
+        # NSE price-band locks: a bar with no range that closed a band-sized move away from the previous
+        # close was frozen at the circuit - nobody could buy at an upper lock or sell at a lower lock.
+        prev = data.close.ffill().shift(1).to_numpy(dtype=float)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            move = self.C / prev - 1
+            flat = (self.H - self.L) <= cost_model.circuit_lock_tol * self.C
+        band = float(cost_model.circuit_band_min)
+        self.lock_up = flat & (move >= band)
+        self.lock_dn = flat & (move <= -band)
 
     # ------------------------------------------------------------------ helpers
     def _slip(self, i: int, j: int, value: float) -> float:
@@ -74,6 +85,14 @@ class Engine:
     def _tradable(self, i: int, j: int) -> bool:
         o, v = self.O[i, j], self.V[i, j]
         return not math.isnan(o) and o > 0 and not (not math.isnan(v) and v <= 0)
+
+    def _cap(self, i: int, j: int) -> int:
+        """Max shares one order can trade today: a share of the day's volume (participation limit)."""
+        v = self.V[i, j]
+        p = float(self.costs.max_participation)
+        if p <= 0 or math.isnan(v):
+            return 10 ** 12
+        return int(math.floor(v * p))
 
     def _sell(self, acct: Account, i: int, sym: str, shares: int, base_px: float, reason: str,
               apply_slip: bool = True) -> None:
@@ -86,27 +105,36 @@ class Engine:
         cost = self.costs.cost("sell", shares * px)
         apply_sell(acct, sym, shares, px, cost, self.dates[i], reason, slippage=shares * base_px * slip)
 
-    def _buy(self, acct: Account, i: int, order: Order) -> bool:
+    def _buy(self, acct: Account, i: int, order: Order) -> tuple[str, int]:
+        """Returns (status, filled): status is 'blocked' (untradable / upper circuit), 'cash' or 'ok'."""
         j = self.col.get(order.symbol)
-        if j is None or not self._tradable(i, j):
-            return False
+        if j is None or not self._tradable(i, j) or self.lock_up[i, j]:
+            return "blocked", 0
         o = self.O[i, j]
-        slip = self._slip(i, j, order.shares * o)
+        want = min(order.shares, self._cap(i, j))
+        slip = self._slip(i, j, want * o)
         px = o * (1 + slip)
         rate = self.costs.proportional_rate("buy")
         affordable = int(math.floor(max(acct.cash, 0.0) / (px * (1 + rate) + 1e-12)))
-        shares = min(order.shares, affordable)
+        shares = min(want, affordable)
+        status = "cash" if affordable < want else "ok"
         if shares <= 0:
-            return True  # nothing affordable - drop the order
+            return "cash", 0
         cost = self.costs.cost("buy", shares * px)
         if shares * px + cost > acct.cash:  # brokerage minimums can tip it over
             shares -= 1
+            status = "cash"
             if shares <= 0:
-                return True
+                return "cash", 0
             cost = self.costs.cost("buy", shares * px)
         apply_buy(acct, order.symbol, shares, px, cost, self.dates[i], order.stop_dist, order.target_dist,
                   order.atr, order.reason, slippage=shares * o * slip)
-        return True
+        return status, shares
+
+    @staticmethod
+    def _carry(o: Order, remaining: int, carry: list) -> None:
+        if remaining and o.ttl > 1:
+            carry.append(replace(o, shares=remaining, ttl=o.ttl - 1))
 
     # --------------------------------------------------------------- main step
     def step(self, i: int, strategy, acct: Account) -> None:
@@ -118,18 +146,21 @@ class Engine:
             j = self.col.get(o.symbol)
             if o.symbol not in acct.positions:
                 continue
-            if j is None or not self._tradable(i, j):
-                if o.ttl > 1:
-                    o.ttl -= 1
-                    carry.append(o)
+            want = min(-o.shares, acct.positions[o.symbol].shares)
+            if j is None or not self._tradable(i, j) or self.lock_dn[i, j]:
+                self._carry(o, -want, carry)
                 continue
-            self._sell(acct, i, o.symbol, -o.shares, self.O[i, j], o.reason)
+            qty = min(want, self._cap(i, j))
+            self._sell(acct, i, o.symbol, qty, self.O[i, j], o.reason)
+            self._carry(o, -(want - qty), carry)
         for o in buys:
-            if not self._buy(acct, i, o) and o.ttl > 1:
-                o.ttl -= 1
-                carry.append(o)
+            status, filled = self._buy(acct, i, o)
+            if status == "blocked":
+                self._carry(o, o.shares, carry)
+            elif status == "ok" and filled < o.shares:     # volume-capped, not cash-capped
+                self._carry(o, o.shares - filled, carry)
 
-        # bracket exits
+        # bracket exits (a stop cannot fill while the stock is locked at its lower circuit)
         for sym in list(acct.positions):
             pos = acct.positions[sym]
             if pos.stop is None and pos.target is None:
@@ -138,14 +169,17 @@ class Engine:
             o, h, l = self.O[i, j], self.H[i, j], self.L[i, j]
             if math.isnan(o) or math.isnan(l) or math.isnan(h):
                 continue
+            qty = min(pos.shares, self._cap(i, j))
+            if pos.stop is not None and (o <= pos.stop or l <= pos.stop) and self.lock_dn[i, j]:
+                continue
             if pos.stop is not None and o <= pos.stop:
-                self._sell(acct, i, sym, pos.shares, o, "stop_gap")
+                self._sell(acct, i, sym, qty, o, "stop_gap")
             elif pos.target is not None and o >= pos.target:
-                self._sell(acct, i, sym, pos.shares, o, "target_gap")
+                self._sell(acct, i, sym, qty, o, "target_gap")
             elif pos.stop is not None and l <= pos.stop:
-                self._sell(acct, i, sym, pos.shares, pos.stop, "stop")
+                self._sell(acct, i, sym, qty, pos.stop, "stop")
             elif pos.target is not None and h >= pos.target:
-                self._sell(acct, i, sym, pos.shares, pos.target, "target", apply_slip=False)
+                self._sell(acct, i, sym, qty, pos.target, "target", apply_slip=False)
 
         # stale / delisted positions and last prices
         for sym in list(acct.positions):
@@ -159,6 +193,7 @@ class Engine:
             else:
                 pos.missing_days = 0
                 pos.last_price = c
+                pos.last_date = self.day_str[i]
 
         if acct.cash > 0:
             acct.cash *= 1 + self.daily_yield
