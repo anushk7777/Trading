@@ -308,9 +308,16 @@ def load_nse_panel(cfg, refresh: bool = False, fetch=_http_get) -> dict:
     raw_dir = Path(n.raw_dir)
     start = pd.Timestamp(cfg.general.start).date()
     end = pd.Timestamp(cfg.general.end).date() if cfg.general.end else date.today()
-    if refresh or not any(raw_dir.glob("*.csv.zip")):
+    cached = sorted(raw_dir.glob("*.csv.zip"))
+    if refresh or not cached:
         stats = download_range(start, end, raw_dir, fetch=fetch, pause=float(n.request_pause))
         log.info("Bhavcopy download: %s", stats)
+    else:  # daily use: only fetch the days after the newest cached file
+        newest = pd.Timestamp(cached[-1].name[:8]).date()
+        if newest < end:
+            stats = download_range(newest + timedelta(days=1), end, raw_dir, fetch=fetch,
+                                   pause=float(n.request_pause))
+            log.info("Bhavcopy update: %s", stats)
     long = build_long(raw_dir, raw_dir.parent / "parsed_long.parquet", tuple(n.series))
     if long.empty:
         raise RuntimeError(f"No bhavcopy files in {raw_dir}. Run `indquant --source nse fetch`.")

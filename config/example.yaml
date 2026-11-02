@@ -1,0 +1,33 @@
+# Your personal settings. Copy this file to config/my.yaml and edit it:
+#
+#     Windows:      copy config\example.yaml config\my.yaml
+#     macOS/Linux:  cp config/example.yaml config/my.yaml
+#
+# indquant reads config/my.yaml automatically (when you run it from the Trading folder).
+# Anything you don't write here keeps its value from config/default.yaml, which documents
+# every setting. Keep this file short: only change what you understand.
+
+general:
+  initial_capital: 500000         # INR you plan to trade with (paper trading uses the same number)
+  start: "2014-01-01"             # how far back history goes for research and backtests
+
+data:
+  source: nse                     # nse = survivorship-free exchange data (recommended); yahoo = quicker, biased
+
+allocation:                       # how capital is split between the two strategies (must add up to <= 1)
+  core: 0.7                       # monthly multi-factor portfolio
+  swing: 0.3                      # short-term trades with stop-loss / target
+
+core:
+  top_n: 20                       # number of stocks; use 10-15 below Rs 3 lakh so each position stays >= ~Rs 15,000
+
+swing:
+  max_positions: 6                # at most this many swing trades open at once
+  risk_per_trade: 0.0075          # lose at most 0.75% of the swing money if a stop-loss is hit
+
+reviewer:
+  enabled: true                   # AI red-flag check; needs ANTHROPIC_API_KEY (see docs/BEGINNER_GUIDE.md)
+  model: claude-opus-5-5          # claude-haiku-5-5 costs ~40x less
+
+execution:
+  broker: manual                  # manual = you place orders in your broker app yourself (free, recommended)

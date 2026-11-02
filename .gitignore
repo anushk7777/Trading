@@ -15,3 +15,6 @@ output/
 state/
 logs/
 .DS_Store
+
+# personal settings
+config/my.yaml

@@ -14,6 +14,10 @@ portfolio construction, account-level circuit breakers, and — most importantly
 > It is research software, not investment advice; the author is not a SEBI-registered
 > investment adviser. You can lose money.
 
+**New to all this?** Follow the **[Beginner's guide](docs/BEGINNER_GUIDE.md)**: installing
+Python, testing the strategy, months of paper trading, then your first real trade click by
+click (console → broker app → GTT stop-loss).
+
 ---
 
 ## What it does
@@ -112,7 +116,7 @@ actually predicts returns before giving it more weight.
 git clone <this repo> && cd Trading
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -e ".[dev,ai]"          # add ",kite" for the optional Zerodha adapter
-pytest                                                  # 88 tests, ~60 s
+pytest                                                  # 92 tests, ~60 s
 ```
 
 Python ≥ 3.10. Dependencies: numpy, pandas, scipy, scikit-learn, lightgbm, cvxpy, yfinance,
@@ -151,11 +155,11 @@ indquant paper-report        # league table, promotion advice, trade journal
 indquant signals             # today's orders (dry run) for the champion
 ```
 
-### Paper-trading routine (cron, after 4 pm IST)
+### Paper-trading routine (cron, evenings)
 
 ```cron
-# Mon–Fri 16:30 IST: update paper book, write signals; non-zero exit = data problem
-30 16 * * 1-5  cd /path/to/Trading && .venv/bin/indquant paper-update >> logs/cron.log 2>&1
+# Mon–Fri 19:30 IST (NSE publishes the day's bhavcopy in the evening; Yahoo users can run after 16:30)
+30 19 * * 1-5  cd /path/to/Trading && .venv/bin/indquant paper-update >> logs/cron.log 2>&1
 ```
 
 Each run writes `output/signals/<date>/<variant>/summary.md` and `orders.csv`: what to buy or
@@ -189,7 +193,7 @@ it into a next-session trade plan. Nothing is ever sent anywhere without your cl
 
 | Button | What happens |
 |---|---|
-| **Refresh plan** (after 4 pm) | Loads data → health check → strategies propose orders for the next open. Swing trades come with ATR stop-loss and target; core buys with a wide disaster stop. Stop/target breaches on your open positions become alerts or exit proposals. Every BUY gets an AI red-flag review. |
+| **Refresh plan** (evening) | Loads data → health check → strategies propose orders for the next open. Swing trades come with ATR stop-loss and target; core buys with a wide disaster stop. Stop/target breaches on your open positions become alerts or exit proposals. Every BUY gets an AI red-flag review. |
 | **Approve** | Hard pre-trade checks (kill switch, max 15% of equity per order, cash, ±5% price band, no short selling, daily order cap), then the broker adapter. |
 | **Mark filled** | Your actual fill is booked exactly like a backtest fill (FIFO lots, Indian charges) and you get the exact **GTT** to place: OCO stop-loss + target for swing trades, single protective stop for core holdings. |
 | **Move stop / Stopped out / Exit** | Manage live positions; stops can only be placed below the price. |
@@ -242,7 +246,7 @@ scientific answer to "my bot has 15 reasons not to trade".
 
 ### Daily routine
 
-1. After 4 pm IST: `indquant console` → **Refresh plan**.
+1. Each trading evening (after ~7 pm for NSE data, ~4:30 pm for Yahoo): `indquant console` → **Refresh plan**.
 2. Read the AI flags, approve what you agree with, and place the orders in your app as AMO.
 3. Next morning, after the orders execute: **Mark filled**, then place the GTT it shows you.
 4. If a GTT fires during the day: **Stopped out** with the fill price.
@@ -294,7 +298,7 @@ If a step fails, the honest conclusion is to buy a low-cost index fund instead.
 ## Configuration
 
 Everything is in `config/default.yaml` (commented). Override with your own YAML
-(`--config my.yaml`, merged over defaults) or inline `--set section.key=value`.
+(`config/my.yaml`, picked up automatically; start from `config/example.yaml`. Or pass `--config file.yaml`, or set `$INDQUANT_CONFIG`), or inline `--set section.key=value`.
 Unknown keys are rejected so typos never silently fall back to defaults.
 
 Key sections: `data`, `nse`, `universe_filter`, `costs`, `allocation`, `core` (+ `core.optimizer`),

@@ -6,7 +6,7 @@ user explicitly forces it); warnings are printed in the signal report.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -31,6 +31,17 @@ def drop_incomplete_bar(data, now: datetime | None = None):
     return data, False
 
 
+def expected_last_session(now: datetime, holidays=()) -> date:
+    """The most recent NSE session whose prices should already be final at ``now`` (IST)."""
+    d = now.date()
+    if now.time() < MARKET_CLOSE_SETTLED:
+        d -= timedelta(days=1)
+    hol = {str(x) for x in holidays}
+    while d.weekday() >= 5 or str(d) in hol:
+        d -= timedelta(days=1)
+    return d
+
+
 def check_data(data, cfg, now: datetime | None = None) -> list[Issue]:
     h = cfg.healthcheck
     issues: list[Issue] = []
@@ -42,6 +53,14 @@ def check_data(data, cfg, now: datetime | None = None) -> list[Issue]:
     stale = int(np.busday_count(last.date(), now.date()))
     if data.source != "synthetic" and stale > int(h.max_stale_days):
         issues.append(Issue("error", f"Data is stale: last bar {last.date()} is {stale} business days old."))
+    elif data.source != "synthetic":
+        holidays = getattr(getattr(cfg, "execution", None), "holidays", None) or []
+        expected = expected_last_session(now, holidays)
+        if last.date() < expected:
+            issues.append(Issue("error", f"Latest data is for {last.date()}, but the {expected} session has already "
+                                         "closed: today's prices are not published yet (NSE usually publishes in the "
+                                         "evening). Try again later. If it was a market holiday, add the date to "
+                                         "execution.holidays (or use --force)."))
     close_last = data.close.iloc[-1]
     if data.close.shape[1]:
         expected = data.close.iloc[-20:].notna().any()

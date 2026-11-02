@@ -529,7 +529,8 @@ def cmd_broker_login(args) -> int:
 # ------------------------------------------------------------------------- parser
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="indquant", description="Systematic trading research for Indian equities")
-    p.add_argument("--config", default=None, help="YAML config merged over config/default.yaml")
+    p.add_argument("--config", default=None,
+                   help="YAML config merged over config/default.yaml (default: $INDQUANT_CONFIG or config/my.yaml)")
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="override a config value")
     p.add_argument("--source", choices=["yahoo", "nse", "csv", "synthetic"], help="shortcut for --set data.source=...")
     p.add_argument("--as-of", dest="as_of", default=None, help="truncate data at this date (YYYY-MM-DD)")
@@ -640,8 +641,22 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def resolve_config_path(explicit: str | None) -> str | None:
+    """--config wins; otherwise $INDQUANT_CONFIG; otherwise config/my.yaml in the current folder if present."""
+    import os
+
+    if explicit:
+        return explicit
+    env = os.environ.get("INDQUANT_CONFIG")
+    if env:
+        return env
+    local = Path("config") / "my.yaml"
+    return str(local) if local.exists() else None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    args.config = resolve_config_path(args.config)
     cfg = load_config(args.config, parse_overrides(args.set))
     _setup_logging(cfg, args.verbose)
     try:
