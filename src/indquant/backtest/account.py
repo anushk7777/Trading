@@ -96,3 +96,72 @@ class Account:
             pending=[Order(**o) for o in d.get("pending", [])], meta=d.get("meta", {}),
             peak_equity=float(d.get("peak_equity", 0.0)), last_date=d.get("last_date"),
         )
+
+
+# ---------------------------------------------------------------------------------
+# Fill bookkeeping shared by the backtest engine, the paper book and the live desk,
+# so a real fill is booked exactly the way a simulated one is.
+# ---------------------------------------------------------------------------------
+def apply_buy(acct: "Account", symbol: str, shares: int, price: float, cost: float, date,
+              stop_dist: float | None = None, target_dist: float | None = None, atr: float | None = None,
+              reason: str = "", slippage: float = 0.0) -> dict:
+    value = shares * price
+    acct.cash -= value + cost
+    day = str(pd.Timestamp(date).date())
+    pos = acct.positions.get(symbol)
+    if pos is None:
+        pos = Position(symbol=symbol, shares=0, lots=[], entry_date=day, entry_price=price, atr=atr)
+        if stop_dist:
+            pos.stop = price - stop_dist
+        if target_dist:
+            pos.target = price + target_dist
+        acct.positions[symbol] = pos
+    pos.shares += shares
+    pos.lots.append(Lot(date=day, shares=shares, cost=(value + cost) / shares))
+    pos.last_price = price
+    trade = {"date": pd.Timestamp(date), "sleeve": acct.name, "symbol": symbol, "side": "buy", "shares": shares,
+             "price": price, "value": value, "costs": cost, "slippage": slippage, "reason": reason,
+             "pnl": None, "holding_days": None, "tax_lots": []}
+    acct.trades.append(trade)
+    return trade
+
+
+def apply_sell(acct: "Account", symbol: str, shares: int, price: float, cost: float, date,
+               reason: str = "", slippage: float = 0.0) -> dict | None:
+    """Book a sale with FIFO lot matching (realised P&L, holding periods for tax)."""
+    pos = acct.positions.get(symbol)
+    if pos is None or shares <= 0:
+        return None
+    shares = min(shares, pos.shares)
+    value = shares * price
+    acct.cash += value - cost
+    sell_date = pd.Timestamp(date)
+    net_px = (value - cost) / shares
+    remaining, basis, lots_used = shares, 0.0, []
+    while remaining > 0 and pos.lots:
+        lot = pos.lots[0]
+        take = min(lot.shares, remaining)
+        basis += take * lot.cost
+        lots_used.append({"shares": take, "buy_date": lot.date, "gain": take * (net_px - lot.cost),
+                          "days": (sell_date - pd.Timestamp(lot.date)).days})
+        lot.shares -= take
+        remaining -= take
+        if lot.shares == 0:
+            pos.lots.pop(0)
+    pnl = value - cost - basis
+    hold = (sell_date - pd.Timestamp(pos.entry_date)).days
+    pos.shares -= shares
+    trade = {"date": sell_date, "sleeve": acct.name, "symbol": symbol, "side": "sell", "shares": shares,
+             "price": price, "value": value, "costs": cost, "slippage": slippage, "reason": reason,
+             "pnl": pnl, "holding_days": hold, "tax_lots": lots_used}
+    acct.trades.append(trade)
+    if pos.shares <= 0:
+        del acct.positions[symbol]
+        # bookkeeping used by the risk governor and re-entry filters
+        total_pnl = pos.realized + pnl
+        acct.meta["loss_streak"] = int(acct.meta.get("loss_streak", 0)) + 1 if total_pnl < 0 else 0
+        acct.meta.setdefault("last_exit", {})[symbol] = {"date": str(sell_date.date()), "reason": reason,
+                                                         "pnl": float(total_pnl)}
+    else:
+        pos.realized += pnl
+    return trade

@@ -337,6 +337,128 @@ def cmd_paper_promote(args) -> int:
     return 0
 
 
+# ------------------------------------------------------------------------- trade desk
+def _make_desk(cfg):
+    from .live.desk import DeskStore, TradeDesk, _Cache
+    from .review.reviewer import RedFlagReviewer
+
+    store = DeskStore(cfg.desk.db_path)
+    reviewer = RedFlagReviewer(cfg, cache=_Cache(store)) if cfg.reviewer.enabled else None
+    return TradeDesk(cfg, store=store, reviewer=reviewer)
+
+
+def _desk_refresh(cfg, args, desk) -> dict:
+    data, issues = _live_prepare(cfg, args)
+    if data is None:
+        raise RuntimeError("Data health check failed: " + "; ".join(i.message for i in issues))
+    universe = None
+    if cfg.data.source != "synthetic":
+        from .data.universe import load_universe
+
+        universe = load_universe(cfg)
+    res = desk.refresh(data, universe)
+    for i in issues:
+        res["alerts"].append(f"[data {i.severity}] {i.message}")
+    return res
+
+
+def _print_plan(desk) -> None:
+    st = desk.state()
+    print(f"Data: {st['data_date']} · broker: {st['broker']}{' (DRY RUN)' if st['dry_run'] else ''} · "
+          f"equity ₹{st['equity']:,.0f}{' · KILL SWITCH ON' if st['kill'] else ''}")
+    for a in st["alerts"]:
+        print(f"! {a}")
+    if st["proposals"]:
+        rows = []
+        for p in st["proposals"]:
+            stop = p["ref_price"] - p["stop_dist"] if p["stop_dist"] else None
+            tgt = p["ref_price"] + p["target_dist"] if p["target_dist"] else None
+            rows.append({"id": p["id"], "sleeve": p["sleeve"], "order": f"{p['side']} {p['symbol']}", "qty": p["qty"],
+                         "limit": p["limit_price"], "stop": stop, "target": tgt, "risk_inr": p["risk_inr"],
+                         "ai": (p["review"] or {}).get("verdict", "-"), "status": p["status"]})
+        with pd.option_context("display.width", 160, "display.float_format", "{:,.2f}".format):
+            print("\nNext-session plan:\n" + pd.DataFrame(rows).to_string(index=False))
+    else:
+        print("\nNo orders proposed.")
+    if st["positions"]:
+        cols = ["sleeve", "symbol", "shares", "avg_cost", "last", "pnl", "stop", "target", "risk_to_stop"]
+        with pd.option_context("display.width", 160):
+            print("\nPositions:\n" + pd.DataFrame(st["positions"])[cols].to_string(index=False))
+
+
+def cmd_desk(args) -> int:
+    cfg = _cfg(args)
+    desk = _make_desk(cfg)
+    a = args.desk_cmd
+    if a == "init":
+        desk.init(float(args.capital or cfg.general.initial_capital))
+        print(f"Desk initialised with ₹{float(args.capital or cfg.general.initial_capital):,.0f} "
+              f"(broker: {desk.broker.name}). Next: `indquant console` or `indquant desk refresh`.")
+        return 0
+    if a == "refresh":
+        res = _desk_refresh(cfg, args, desk)
+        print(f"{res['proposals']} proposal(s), {res['reviewed']} AI-reviewed.")
+        _print_plan(desk)
+        return 0
+    if a == "status":
+        _print_plan(desk)
+        return 0
+    if a == "journal":
+        data = _load(cfg, args)
+        print(desk.settle_journal(data).to_string(index=False) or "Nothing settled yet.")
+        print("\nAlpha vs benchmark after N sessions. If 'veto:*' / 'ai_veto' rows have LOWER alpha than "
+              "'proposed', the filters are avoiding losers; if higher, they are blocking winners.")
+        return 0
+    actions = {
+        "approve": lambda: desk.approve(args.id, args.override, args.qty, args.price),
+        "skip": lambda: desk.skip(args.id, args.reason or "") or {"message": "skipped"},
+        "fill": lambda: desk.confirm_fill(args.id, args.qty, args.price),
+        "cancel": lambda: desk.cancel(args.id) or {"message": "cancelled"},
+        "exit": lambda: desk.exit_position(args.sleeve, args.symbol),
+        "stopped": lambda: desk.stopped_out(args.sleeve, args.symbol, args.price),
+        "stop": lambda: desk.set_stop(args.sleeve, args.symbol, args.stop, args.target),
+        "kill": lambda: desk.kill_switch(args.reason or "cli"),
+        "resume": desk.resume,
+        "flatten": lambda: desk.flatten(args.confirm or ""),
+        "sync": desk.sync,
+    }
+    try:
+        res = actions[a]()
+    except (ValueError, KeyError) as exc:
+        print(f"Error: {exc}")
+        return 1
+    for k, v in (res or {}).items():
+        print(f"{k}: {v}")
+    return 0
+
+
+def cmd_console(args) -> int:
+    from .live.console import ConsoleApp
+
+    cfg = _cfg(args)
+    desk = _make_desk(cfg)
+    if not desk.store.accounts():
+        desk.init(float(cfg.general.initial_capital))
+        print(f"Desk initialised with ₹{float(cfg.general.initial_capital):,.0f}.")
+    app = ConsoleApp(desk, lambda: _desk_refresh(cfg, args, desk), cfg.desk.host, int(args.port or cfg.desk.port))
+    app.serve(open_browser=not args.no_browser)
+    return 0
+
+
+def cmd_broker_login(args) -> int:
+    from .execution.brokers import kite_complete_login, kite_login_url
+
+    cfg = _cfg(args)
+    if not args.request_token:
+        print("1. Open this URL, log in to Zerodha, and copy the `request_token` from the page you land on:\n")
+        print("   " + kite_login_url(cfg))
+        print("\n2. Run: indquant broker-login --request-token <token>")
+        return 0
+    kite_complete_login(cfg, args.request_token)
+    print(f"Kite session saved to {cfg.execution.kite_token_file} (valid for today).")
+    return 0
+
+
 # ------------------------------------------------------------------------- parser
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="indquant", description="Systematic trading research for Indian equities")
@@ -392,6 +514,54 @@ def build_parser() -> argparse.ArgumentParser:
     pi.set_defaults(func=cmd_paper_init)
 
     sub.add_parser("paper-report", help="variant league table and trade journal").set_defaults(func=cmd_paper_report)
+
+    co = sub.add_parser("console", help="open the one-click trade desk in your browser")
+    co.add_argument("--port", type=int, default=None)
+    co.add_argument("--no-browser", action="store_true")
+    co.add_argument("--force", action="store_true", help="ignore data health errors on refresh")
+    co.add_argument("--allow-intraday", action="store_true")
+    co.set_defaults(func=cmd_console)
+
+    bl = sub.add_parser("broker-login", help="Zerodha Kite Connect daily login")
+    bl.add_argument("--request-token", default=None)
+    bl.set_defaults(func=cmd_broker_login)
+
+    dk = sub.add_parser("desk", help="trade desk from the terminal (same actions as the console)")
+    dsub = dk.add_subparsers(dest="desk_cmd", required=True)
+    di = dsub.add_parser("init")
+    di.add_argument("--capital", type=float, default=None)
+    for name in ("refresh",):
+        x = dsub.add_parser(name)
+        x.add_argument("--force", action="store_true")
+        x.add_argument("--allow-intraday", action="store_true")
+    for name in ("status", "journal", "resume", "sync"):
+        dsub.add_parser(name)
+    for name in ("approve", "skip", "fill", "cancel"):
+        x = dsub.add_parser(name)
+        x.add_argument("id", type=int)
+        if name == "approve":
+            x.add_argument("--override", default=None, help="reason for overriding an AI veto")
+            x.add_argument("--qty", type=int, default=None)
+            x.add_argument("--price", type=float, default=None, help="limit price")
+        if name == "fill":
+            x.add_argument("--qty", type=int, required=True)
+            x.add_argument("--price", type=float, required=True)
+        if name == "skip":
+            x.add_argument("--reason", default=None)
+    for name in ("exit", "stopped", "stop"):
+        x = dsub.add_parser(name)
+        x.add_argument("sleeve")
+        x.add_argument("symbol")
+        if name == "stopped":
+            x.add_argument("--price", type=float, required=True)
+        if name == "stop":
+            x.add_argument("--stop", type=float, required=True)
+            x.add_argument("--target", type=float, default=None)
+    k = dsub.add_parser("kill")
+    k.add_argument("--reason", default=None)
+    f = dsub.add_parser("flatten")
+    f.add_argument("--confirm", default=None, help='must be exactly "SELL ALL"')
+    dk.set_defaults(func=cmd_desk)
     pp = sub.add_parser("paper-promote", help="make a variant the champion (manual decision)")
     pp.add_argument("--variant", required=True)
     pp.set_defaults(func=cmd_paper_promote)

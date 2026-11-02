@@ -69,6 +69,9 @@ class SwingStrategy:
         self.ret1 = c.pct_change(fill_method=None)
         self.day_range = data.high - data.low
         self.adv = (c * data.volume).rolling(63, min_periods=20).mean()
+        from ..features.own_signals import circuit_days
+
+        self.circuit = circuit_days(data)
 
         ma = int(cfg.risk.regime_ma)
         idx_ma = data.index.rolling(ma, min_periods=ma).mean()
@@ -114,6 +117,8 @@ class SwingStrategy:
         rng = self.day_range.at[date, sym]
         if not math.isnan(rng) and rng / a > float(f.max_range_atr):
             return "erratic_range"
+        if self.circuit.at[date, sym] > float(f.max_circuit_days):
+            return "circuit_prone"
         last = account.meta.get("last_exit", {}).get(sym)
         if last and last.get("pnl", 0) < 0:
             days = np.busday_count(pd.Timestamp(last["date"]).date(), date.date())

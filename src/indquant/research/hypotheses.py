@@ -31,6 +31,15 @@ HYPOTHESES = {
                      reference="George & Hwang (2004)"),
     "quality": dict(sign=+1, mechanism="Profitable, low-leverage firms are under-priced relative to their "
                     "persistence of earnings.", reference="Asness, Frazzini & Pedersen (2019) 'Quality minus junk'"),
+    "smooth_momentum": dict(sign=+1, mechanism="Information arriving in many small pieces is under-reacted to "
+                            "(limited attention), so steady-drift momentum persists longer than jump momentum.",
+                            reference="Da, Gurun & Warachka (2014) 'Frog in the pan'"),
+    "lottery_aversion": dict(sign=+1, mechanism="Investors overpay for lottery-like stocks with extreme daily "
+                             "spikes; avoiding them avoids subsequent underperformance.",
+                             reference="Bali, Cakici & Whitelaw (2011) 'Maxing out'"),
+    "circuit_risk": dict(sign=+1, mechanism="Stocks repeatedly pinned at NSE price bands are thinly traded / "
+                         "operator-driven; their momentum is fragile and exits gap through stops.",
+                         reference="indquant hypothesis (India-specific; must be validated by `indquant research`)"),
     "value": dict(sign=+1, mechanism="Risk premium for distressed firms and extrapolation errors by investors.",
                   reference="Fama & French (1992); Lakonishok, Shleifer & Vishny (1994)"),
 }

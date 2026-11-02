@@ -174,7 +174,9 @@ class FactorPortfolioStrategy:
             delta = target - current
             if delta == 0 or (abs(delta) * px < min_trade and target > 0):
                 continue
-            order = Order(sym, delta, "rebalance" if current else "rebalance_entry", date, ttl=3, ref_price=px)
+            stop_dist = px * float(self.c.disaster_stop_pct) if self.c.disaster_stop_pct and delta > 0 else None
+            order = Order(sym, delta, "rebalance" if current else "rebalance_entry", date, ttl=3, ref_price=px,
+                          stop_dist=stop_dist)
             (buys if delta > 0 else sells).append(order)
         buys.sort(key=lambda o: -o.shares * (o.ref_price or 0))
         return sells + buys

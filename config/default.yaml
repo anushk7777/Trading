@@ -72,6 +72,10 @@ core:                             # multi-factor portfolio, monthly rebalance
     high_52w: 0.5
     low_beta: 0.0
     reversal_1m: 0.25
+    smooth_momentum: 0.25         # own idea: momentum path quality ("frog in the pan")
+    lottery_aversion: 0.25        # own idea: avoid lottery-like spikes (MAX effect)
+    circuit_risk: 0.25            # own idea: penalise stocks pinned at NSE price bands
+  disaster_stop_pct: 0.25         # protective stop per core holding (GTT); catastrophic-loss insurance only
 
 swing:                            # daily swing signals with ATR brackets
   enabled: true
@@ -101,6 +105,7 @@ swing:                            # daily swing signals with ATR brackets
     max_portfolio_heat: 0.05      # total open risk (sum of entry-to-stop losses) / equity
     news_veto_below: -0.30        # decayed headline sentiment below this blocks entries
     event_blackout_days: 3        # no entries this many sessions before a known event (results etc.)
+    max_circuit_days: 2           # skip stocks pinned at a price band on more than N of the last 63 sessions
 
 risk:
   target_vol: 0.15                # annualised portfolio volatility target (core sleeve)
@@ -143,6 +148,42 @@ healthcheck:
   max_stale_days: 4               # refuse to signal if data is older than this many business days
   min_coverage: 0.80              # share of universe that must have a price on the last date
   max_extreme_moves: 0.05         # share of universe with |1-day move| > 20% that indicates bad data
+
+reviewer:                         # AI red-flag reviewer (Claude) - live trading only, never in backtests
+  enabled: true                   # needs ANTHROPIC_API_KEY (or `ant auth login`); otherwise trades show "REVIEW"
+  model: claude-opus-5-5          # set claude-haiku-5-5 for ~40x lower cost
+  effort: low
+  max_tokens: 16000
+  fallbacks: default              # server-side fallback model if the request is declined (null to disable)
+  challenge_vetoes: true          # a VETO is re-checked by an independent second pass
+  max_reviews_per_run: 15
+  lookback_days: 14
+  max_headlines: 25
+  news_query_suffix: "share NSE"
+  price_in_per_mtok: 4.0          # for the cost estimate shown on the console (USD)
+  price_out_per_mtok: 20.0
+
+execution:
+  broker: manual                  # manual (free: you place orders in your app) | kite (Zerodha Personal API)
+  dry_run: true                   # kite only: log orders instead of sending them
+  limit_buffer: 0.005             # limit price = last close +0.5% for buys / -0.5% for sells
+  stop_limit_buffer: 0.01         # stop-loss GTT: limit price 1% below the trigger so it fills on gaps
+  tick_size: 0.05
+  max_order_pct: 0.15             # pre-trade check: one order <= 15% of total equity
+  max_orders_per_day: 25
+  max_price_deviation: 0.05       # pre-trade check: limit within 5% of the last close
+  holidays: []                    # NSE trading holidays (YYYY-MM-DD) for AMO timing
+  order_tag: indquant
+  algo_id: null                   # exchange Algo-ID if your broker assigns one (SEBI 2026 framework)
+  kite_api_key_env: KITE_API_KEY
+  kite_api_secret_env: KITE_API_SECRET
+  kite_token_file: state/kite_session.json
+
+desk:
+  db_path: state/desk.db
+  host: 127.0.0.1
+  port: 8765
+  journal_horizons: [5, 20]
 
 ml:
   enabled: true

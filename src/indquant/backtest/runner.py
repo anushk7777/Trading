@@ -140,6 +140,11 @@ def build_warnings(cfg, data, res: BacktestResult) -> list[str]:
     if dsr is not None and not np.isnan(dsr) and dsr < 0.95:
         w.append(f"NOT STATISTICALLY SIGNIFICANT: deflated Sharpe probability {dsr:.2f} < 0.95 "
                  f"(n_trials={cfg.validation.n_trials}). The result is consistent with luck.")
+    t = m.get("alpha_tstat")
+    if t is not None and not np.isnan(t) and t < 2 and m.get("excess_cagr", -1) >= 0:
+        w.append(f"NO SIGNIFICANT EDGE OVER THE INDEX: alpha t-stat {t:.2f} < 2. Beating {cfg.data.benchmark} by "
+                 f"{m['excess_cagr']:.1%}/yr here is explained by market exposure plus luck; a high Sharpe alone "
+                 "only shows that the market went up.")
     if m.get("excess_cagr") is not None and m["excess_cagr"] < 0:
         w.append(f"UNDERPERFORMS BENCHMARK: CAGR is {m['excess_cagr']:.1%} per year below "
                  f"{cfg.data.benchmark} after costs. A low-cost index fund would have done better.")

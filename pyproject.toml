@@ -23,6 +23,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+ai = ["anthropic>=2.3"]
+kite = ["kiteconnect>=5.0"]
 
 [project.scripts]
 indquant = "indquant.cli:main"

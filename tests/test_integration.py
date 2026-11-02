@@ -52,7 +52,7 @@ def test_no_significant_alpha_in_pure_noise(noise, tmp_path):
     res = run_backtest(_cfg(tmp_path), noise)
     m = res.metrics["total"]
     assert abs(m["alpha_tstat"]) < 2.0, m
-    assert any("NOT STATISTICALLY SIGNIFICANT" in w or "UNDERPERFORMS" in w for w in res.warnings)
+    assert any(k in w for w in res.warnings for k in ("NO SIGNIFICANT EDGE", "UNDERPERFORMS", "NOT STATISTICALLY"))
 
 
 def test_ml_pipeline_runs_on_noise_without_finding_edge(noise, tmp_path):

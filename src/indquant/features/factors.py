@@ -43,6 +43,9 @@ def compute_factors(data) -> dict[str, pd.DataFrame]:
         "trend": c / c.rolling(200, min_periods=200).mean() - 1,
         "high_52w": c / c.rolling(252, min_periods=200).max() - 1,
     }
+    from .own_signals import own_factors
+
+    factors.update(own_factors(data))
     f = data.fundamentals or {}
     if "roe" in f and "debt_to_equity" in f:
         factors["quality"] = cs_rank(f["roe"]) - cs_rank(f["debt_to_equity"])
