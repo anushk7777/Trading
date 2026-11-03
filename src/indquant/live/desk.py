@@ -222,17 +222,27 @@ class TradeDesk:
             self.store.update_proposal(p["id"], status="expired" if p["data_date"] != day else "replaced")
         open_ = self.store.proposals("status IN ('awaiting_fill','submitted','dry_run')")
         alerts, new_ids = [], []
+        # 1) corporate actions first - they rescale share counts and stop / target levels
+        for name, acct in accounts.items():
+            evs = reconcile(acct, data)
+            for ev in evs:
+                alerts.append(f"{name}/{ev['message']}")
+                self.store.event("corporate_action", sleeve=name, **ev)
+                if ev["kind"] == "split" and ev["symbol"] in acct.positions:
+                    alerts.append(self._reprotect(name, ev["symbol"], acct.positions[ev["symbol"]], "corporate action"))
+            if evs:
+                self.store.save_account(acct)
+        # 2) fake-money broker: fill yesterday's approved orders and run paper stop-losses on the new bars
+        if getattr(self.broker, "simulated", False):
+            alerts += self._simulate_paper(data, engine)
+            accounts = self.store.accounts()
+            open_ = self.store.proposals("status IN ('awaiting_fill','submitted','dry_run')")
         total_equity = sum(a.equity(close) for a in accounts.values())
 
         for name, strat in strategies.items():
             acct = accounts.get(name)
             if acct is None:
                 continue
-            for ev in reconcile(acct, data):
-                alerts.append(f"{name}/{ev['message']}")
-                self.store.event("corporate_action", sleeve=name, **ev)
-                if ev["kind"] == "split" and ev["symbol"] in acct.positions:
-                    alerts.append(self._reprotect(name, ev["symbol"], acct.positions[ev["symbol"]], "corporate action"))
             for sym, pos in acct.positions.items():
                 if not np.isnan(close.get(sym, np.nan)):
                     pos.last_price = float(close[sym])
@@ -446,7 +456,7 @@ class TradeDesk:
         self.store.event("fill", id=pid, symbol=p["symbol"], side=p["side"], qty=qty, price=price, cost=cost)
         return {"status": "filled", "message": message}
 
-    def stopped_out(self, sleeve: str, symbol: str, price: float, reason: str = "stop") -> dict:
+    def stopped_out(self, sleeve: str, symbol: str, price: float, reason: str = "stop", when=None) -> dict:
         """A protective GTT executed at the broker - book it."""
         accts = self.store.accounts()
         acct = accts[sleeve]
@@ -454,7 +464,7 @@ class TradeDesk:
         if pos is None:
             raise ValueError(f"No {symbol} position in {sleeve}")
         trade = apply_sell(acct, symbol, pos.shares, float(price), self.costs.cost("sell", pos.shares * price),
-                           datetime.now(), reason)
+                           when or datetime.now(), reason)
         message = self._after_exit(sleeve, symbol, acct)
         self.store.save_account(acct)
         self._record_fill(sleeve, trade)
@@ -492,7 +502,9 @@ class TradeDesk:
     def kill_switch(self, reason: str = "") -> dict:
         self.store.put("kill", True)
         n = 0
-        for p in self.store.proposals("side='BUY' AND status IN ('pending','blocked_ai')"):
+        cancellable = "('pending','blocked_ai','submitted')" if getattr(self.broker, "simulated", False) \
+            else "('pending','blocked_ai')"
+        for p in self.store.proposals(f"side='BUY' AND status IN {cancellable}"):
             self.store.update_proposal(p["id"], status="cancelled_kill")
             n += 1
         res = self.broker.cancel_open_orders()
@@ -542,6 +554,75 @@ class TradeDesk:
                     booked.append(sym)
         self.store.event("sync", booked=booked)
         return {"booked": booked}
+
+    # ------------------------------------------------------------------ fake-money simulation
+    def _simulate_paper(self, data, engine) -> list[str]:
+        """Paper broker: fill approved orders at the first session after their decision date and run
+        paper GTT stop-loss / target checks bar by bar - the same rules as the backtest engine."""
+        dates, msgs, fill_idx = data.dates, [], {}
+        for p in self.store.proposals("status='submitted'"):
+            k = int(dates.searchsorted(pd.Timestamp(p["data_date"]), side="right"))
+            if k >= len(dates):
+                continue                                      # next session not in the data yet
+            j = engine.col.get(p["symbol"])
+            o = engine.O[k, j] if j is not None else np.nan
+            if j is None or np.isnan(o):
+                self.store.update_proposal(p["id"], status="expired", message="Paper: stock did not trade")
+                continue
+            h, low = engine.H[k, j], engine.L[k, j]
+            limit, qty = float(p["limit_price"]), min(int(p["qty"]), engine._cap(k, j))
+            slip = engine._slip(k, j, qty * o)
+            price = None
+            if p["side"] == "BUY" and not engine.lock_up[k, j]:
+                price = min(o * (1 + slip), limit) if o <= limit else (limit if low <= limit else None)
+            elif p["side"] == "SELL" and not engine.lock_dn[k, j]:
+                price = max(o * (1 - slip), limit) if o >= limit else (limit if h >= limit else None)
+            if price is None or qty <= 0:
+                self.store.update_proposal(p["id"], status="expired",
+                                           message=f"Paper: limit ₹{limit:,.2f} not reached on {dates[k].date()} "
+                                                   f"(open ₹{o:,.2f})")
+                msgs.append(f"Paper order {p['side']} {p['symbol']} not filled: limit not reached.")
+                continue
+            if p["side"] == "SELL":
+                held = self.store.accounts()[p["sleeve"]].positions.get(p["symbol"])
+                if held is None:
+                    self.store.update_proposal(p["id"], status="superseded", message="Paper: already closed")
+                    continue
+                qty = min(qty, held.shares)
+            self.confirm_fill(p["id"], qty, round(price, 2), when=dates[k])
+            if p["side"] == "BUY":
+                fill_idx[(p["sleeve"], p["symbol"])] = k
+            msgs.append(f"Paper fill: {p['side']} {qty} {p['symbol']} @ ₹{price:,.2f} on {dates[k].date()}.")
+        for sleeve, acct in self.store.accounts().items():
+            for sym, pos in list(acct.positions.items()):
+                if (pos.stop is None and pos.target is None) or sym not in engine.col:
+                    continue
+                j = engine.col[sym]
+                start = fill_idx.get((sleeve, sym))
+                if start is None:
+                    start = int(dates.searchsorted(pd.Timestamp(pos.last_date), side="right")) if pos.last_date \
+                        else int(dates.searchsorted(pd.Timestamp(pos.entry_date), side="left"))
+                for t in range(start, len(dates)):
+                    o, h, low = engine.O[t, j], engine.H[t, j], engine.L[t, j]
+                    if np.isnan(o) or np.isnan(low):
+                        continue
+                    hit = None
+                    if pos.stop is not None and (o <= pos.stop or low <= pos.stop) and engine.lock_dn[t, j]:
+                        continue                              # frozen at the lower circuit: cannot sell
+                    if pos.stop is not None and o <= pos.stop:
+                        hit = (o, "stop_gap")
+                    elif pos.target is not None and o >= pos.target:
+                        hit = (o, "target_gap")
+                    elif pos.stop is not None and low <= pos.stop:
+                        hit = (pos.stop, "stop")
+                    elif pos.target is not None and h >= pos.target:
+                        hit = (pos.target, "target")
+                    if hit:
+                        self.stopped_out(sleeve, sym, round(float(hit[0]), 2), f"paper_{hit[1]}", when=dates[t])
+                        msgs.append(f"Paper GTT fired: {sleeve}/{sym} sold @ ₹{hit[0]:,.2f} ({hit[1]}) on "
+                                    f"{dates[t].date()}.")
+                        break
+        return msgs
 
     # ------------------------------------------------------------------ helpers
     def _reprotect(self, sleeve, symbol, pos, why) -> str:

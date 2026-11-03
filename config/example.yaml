@@ -30,4 +30,5 @@ reviewer:
   model: claude-opus-5-5          # claude-haiku-5-5 costs ~40x less
 
 execution:
-  broker: manual                  # manual = you place orders in your broker app yourself (free, recommended)
+  broker: manual                  # manual = you place orders in your broker app (free); paper = fake money,
+                                  # filled automatically against real next-day prices (practice mode)

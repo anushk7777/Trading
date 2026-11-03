@@ -59,8 +59,11 @@ class FactorPortfolioStrategy:
         self.factors = compute_factors(data)
         names = [k for k in c.factor_weights if k in self.factors]
         unknown = [k for k in c.factor_weights if k not in self.factors]
-        if unknown:
-            log.warning("Ignoring factors without data: %s", unknown)
+        optional = {"quality", "value", "insider_buying", "smart_money"}   # need extra data files
+        if [k for k in unknown if k not in optional]:
+            log.warning("Ignoring factors without data: %s", [k for k in unknown if k not in optional])
+        if [k for k in unknown if k in optional]:
+            log.info("Optional factors without data (skipped): %s", [k for k in unknown if k in optional])
         no_rationale = unsupported_factors([k for k in names if float(c.factor_weights[k]) != 0])
         if no_rationale:
             log.warning("Factors without a registered economic hypothesis (data-mining risk): %s", no_rationale)

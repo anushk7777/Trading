@@ -119,8 +119,10 @@ def apply_buy(acct: "Account", symbol: str, shares: int, price: float, cost: flo
         acct.positions[symbol] = pos
     pos.shares += shares
     pos.lots.append(Lot(date=day, shares=shares, cost=(value + cost) / shares))
-    pos.last_price = price
-    pos.last_date = day
+    if pos.last_date is None:
+        # a fill price is not a closing-price mark: leave last_date empty so corporate-action
+        # reconciliation only ever compares closes with closes
+        pos.last_price = price
     trade = {"date": pd.Timestamp(date), "sleeve": acct.name, "symbol": symbol, "side": "buy", "shares": shares,
              "price": price, "value": value, "costs": cost, "slippage": slippage, "reason": reason,
              "pnl": None, "holding_days": None, "tax_lots": []}

@@ -46,6 +46,10 @@ def compute_factors(data) -> dict[str, pd.DataFrame]:
     from .own_signals import own_factors
 
     factors.update(own_factors(data))
+    if getattr(data, "alt_data", None):
+        from .smart_money import smart_money_factors
+
+        factors.update(smart_money_factors(data))
     f = data.fundamentals or {}
     if "roe" in f and "debt_to_equity" in f:
         factors["quality"] = cs_rank(f["roe"]) - cs_rank(f["debt_to_equity"])

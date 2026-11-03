@@ -116,7 +116,7 @@ actually predicts returns before giving it more weight.
 git clone <this repo> && cd Trading
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -e ".[dev,ai]"          # add ",kite" for the optional Zerodha adapter
-pytest                                                  # 92 tests, ~60 s
+pytest                                                  # 108 tests, ~2 min
 ```
 
 Python ≥ 3.10. Dependencies: numpy, pandas, scipy, scikit-learn, lightgbm, cvxpy, yfinance,
@@ -208,6 +208,7 @@ Every action goes to an append-only audit log.
 | Mode | Cost | How |
 |---|---|---|
 | `execution.broker: manual` *(default)* | Free | The desk gives click-by-click instructions (CNC LIMIT order, AMO after hours, then the GTT OCO). You place them in Kite/Groww/Upstox/any app and press **Mark filled**. No API keys, no regulatory setup. |
+| `execution.broker: paper` | Free, fake money | The same console and buttons, but approved orders fill **automatically against the next session's real prices** (limit respected, slippage, circuit locks), and paper GTTs are checked bar by bar. Kept in a separate book (`state/desk_paper.db`). Start tonight, see fills tomorrow evening. |
 | `execution.broker: kite` | Kite Connect **Personal** API is free for order placement (no market data, which indquant doesn't need) | Since SEBI's retail-algo framework took effect on 1 Apr 2026, API orders must come from a registered app on a **whitelisted static IP**, so you may need a static IP from your ISP or a small cloud VM. Set `KITE_API_KEY` / `KITE_API_SECRET`, run `indquant broker-login` each morning, and keep `execution.dry_run: true` until you've watched it for a while. Your click is still required for every order. |
 
 ### AI red-flag reviewer (Claude)
@@ -266,6 +267,48 @@ benchmark. Left out on purpose:
 * A decision-quality-only backtest with no costs: everything here runs through the
   cost-aware portfolio engine.
 
+## Smart money: following investors whose edge isn't luck
+
+Two public, SEBI-mandated disclosures feed two factors in the core composite, the optimizer,
+and the ML models of both sleeves:
+
+* **`insider_buying`:** promoters, directors and key managers buying their own company's
+  shares on the open market (ESOPs, gifts and off-market transfers excluded), keyed to the
+  filing's broadcast time.
+* **`smart_money`:** net buying in bulk deals by clients with a *statistically proven* record.
+  Each month every client is scored only on deals whose 63-day outcome is already known. The
+  **Benjamini-Hochberg** false-discovery test (the method used to separate skilled from lucky
+  fund managers) then keeps only records unlikely to be chance, and short records are shrunk.
+
+Scanning thousands of traders always finds some with great track records by pure luck. In
+the synthetic tests, a noise trader with t = 2.1 (p = 0.02) looks skilled on its own and is
+correctly rejected, while the genuinely skilled clients are kept.
+
+```bash
+indquant disclosures fetch --since 2018-01-01      # best effort from nseindia.com
+indquant disclosures import --bulk bulk.csv --insider insider.csv   # CSV exports from nseindia.com
+indquant smart-money                                # skilled clients, q-values, recent insider buying
+```
+
+Both factors carry registered hypotheses, so `indquant research` reports whether Indian data
+supports them. Both are optional: without disclosure files they are simply skipped.
+
+## Position sizing: calibrated Kelly
+
+Swing trades risk at most 0.75% of the sleeve each, and less when the evidence is weaker:
+`risk = min(0.75%, ¼ × mean_R / var_R)`. Here mean_R and var_R are the realised R-multiples,
+after costs, of the trades the strategy would actually have taken, counting only outcomes
+known at that date. While the selected trades keep paying, size stays at the fixed rule; when
+their edge fades, size shrinks automatically and marginal trades are skipped
+(`kelly_edge_too_small`).
+
+In testing:
+* On a market with a real edge it changed nothing.
+* On a pure-noise market it cut trades by 31%, cost drag from 3.9% to 2.3% a year, and the
+  worst drawdown from −23% to −19%.
+
+It never enlarges a position.
+
 ## indquant's own signal ideas
 
 Kept small, about 1% of the code (`features/own_signals.py` plus wiring), each with a registered
@@ -318,6 +361,8 @@ Key sections: `data`, `nse`, `universe_filter`, `costs`, `allocation`, `core` (+
 | `nse.dividends_file` | `symbol,ex_date,amount` | total-return prices for the NSE source |
 | `nse.sector_file` | `symbol,sector` | sectors for historical / delisted names |
 | `data.extra_benchmarks` | list of Yahoo tickers | factor / smart-beta ETFs the strategy must beat |
+| `smart_money.bulk_deals_file` | NSE bulk-deals export (Date, Symbol, Client Name, Buy/Sell, Quantity, Price); imported with `indquant disclosures import` | `smart_money` factor |
+| `smart_money.insider_file` | NSE insider-trading (PIT) export; promoter/director open-market trades are kept | `insider_buying` factor |
 
 ## Portfolio construction: optimizer
 
@@ -372,10 +417,12 @@ than the heuristic. With no signal it traded about 40–50% less and still found
 config/default.yaml          all parameters
 src/indquant/
   data/        NSE bhavcopy (survivorship-free), yahoo, csv, synthetic, universe, fundamentals, sentiment,
-               events, cross-source audit
-  features/    factors (momentum, residual momentum, low-vol, beta, reversal, trend, 52w-high), technicals, preprocessing
+               events, smart-money disclosures, cross-source audit
+  features/    factors (momentum, residual momentum, low-vol, beta, reversal, trend, 52w-high), smart money,
+               technicals, preprocessing
   research/    factor IC / quantile analysis, hypotheses registry, trial log, null test, PBO, backtest expectations
-  models/      labels (forward-rank, triple-barrier), purged walk-forward validation, LightGBM ranker
+  models/      labels (forward-rank, triple-barrier), purged walk-forward validation, LightGBM ranker,
+               calibrated Kelly sizing
   portfolio/   cvxpy optimizer, selection & caps, covariance / vol target / regime, risk governor
   strategies/  factor_portfolio (core), swing
   backtest/    costs, account, engine, metrics, runner, factor attribution, stress tests, HTML report

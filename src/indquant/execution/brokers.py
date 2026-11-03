@@ -38,6 +38,7 @@ def protective_legs(stop: float | None, target: float | None, ex) -> dict:
 class Broker:
     name = "base"
     sends_orders = False
+    simulated = False
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -86,6 +87,32 @@ class ManualBroker(Broker):
             text = (f"Create a GTT → Single for {symbol} (CNC, sell qty {qty}): trigger ₹{legs['stop_trigger']:,.2f}, "
                     f"limit ₹{legs['stop_limit']:,.2f} (protective stop).")
         return {"ref": f"MANGTT-{uuid.uuid4().hex[:8]}", "message": text, **legs}
+
+
+class PaperBroker(Broker):
+    """Fake money: approved orders fill automatically against real next-session prices."""
+    name = "paper"
+    simulated = True
+
+    def submit(self, p: dict) -> dict:
+        return {"status": "submitted", "ref": f"PAPER-{uuid.uuid4().hex[:8]}",
+                "message": "Paper order queued - it fills automatically at the next session's open if the price "
+                           "allows. Refresh after that session to see the result."}
+
+    def protect(self, symbol, qty, stop, target, last) -> dict:
+        legs = protective_legs(stop, target, self.ex)
+        if not legs:
+            return {"ref": None, "message": ""}
+        parts = [f"stop ₹{legs['stop_trigger']:,.2f}"] + ([f"target ₹{legs['target_trigger']:,.2f}"]
+                                                         if "target_trigger" in legs else [])
+        return {"ref": f"PAPERGTT-{uuid.uuid4().hex[:8]}",
+                "message": f"Paper GTT armed for {symbol} ({' / '.join(parts)}) - checked automatically.", **legs}
+
+    def remove_protection(self, ref, symbol) -> dict:
+        return {"message": f"Paper GTT for {symbol} removed."}
+
+    def cancel_open_orders(self) -> dict:
+        return {"message": "Open paper orders cancelled."}
 
 
 class KiteBroker(Broker):
@@ -202,6 +229,8 @@ class _KiteConstants:
 def make_broker(cfg, kite=None) -> Broker:
     if cfg.execution.broker == "kite":
         return KiteBroker(cfg, kite)
+    if cfg.execution.broker == "paper":
+        return PaperBroker(cfg)
     return ManualBroker(cfg)
 
 

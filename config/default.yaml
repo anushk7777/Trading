@@ -27,6 +27,19 @@ data:
     n_days: 2520
     start: "2015-01-01"
     alpha_strength: 1.0           # 0 = pure random walk (no edge exists)
+    disclosures: true             # generate synthetic bulk deals / insider trades (planted skill) for the demo
+
+smart_money:                      # public disclosures: NSE bulk deals + SEBI insider-trading (PIT) filings
+  enabled: true
+  bulk_deals_file: data/disclosures/bulk_deals.csv
+  insider_file: data/disclosures/insider.csv
+  auto_fetch: true                # try NSE's website for the last 30 days on each load (best effort)
+  insider_lookback: 63            # sessions of insider net buying summed into the signal
+  deal_lookback: 21               # sessions of skilled-client bulk deals summed into the signal
+  skill_horizon: 63               # sessions after a deal used to score a client's skill
+  min_deals: 8                    # a client needs this many fully-scored deals to be tested
+  fdr_q: 0.10                     # Benjamini-Hochberg false-discovery rate for "skilled" clients
+  shrink_n: 10                    # skill estimates shrunk toward zero with this many pseudo-deals
 
 nse:                              # data.source=nse: exchange bhavcopies incl. delisted stocks
   raw_dir: data/nse/raw
@@ -103,6 +116,8 @@ core:                             # multi-factor portfolio, monthly rebalance
     smooth_momentum: 0.25         # own idea: momentum path quality ("frog in the pan")
     lottery_aversion: 0.25        # own idea: avoid lottery-like spikes (MAX effect)
     circuit_risk: 0.25            # own idea: penalise stocks pinned at NSE price bands
+    insider_buying: 0.5           # promoters / directors buying their own shares (needs disclosure data)
+    smart_money: 0.5              # bulk-deal buyers with statistically proven skill (needs disclosure data)
   disaster_stop_pct: 0.25         # protective stop per core holding (GTT); catastrophic-loss insurance only
 
 swing:                            # daily swing signals with ATR brackets
@@ -120,6 +135,9 @@ swing:                            # daily swing signals with ATR brackets
                                   # (R = trade return / risk to stop; 0.10 = +10% of the risked amount)
   max_new_per_day: 3
   cash_buffer: 0.01
+  kelly_fraction: 0.25            # calibrated quarter-Kelly; can only SHRINK risk below risk_per_trade (null = off)
+  kelly_window: 504               # sessions of known prediction outcomes used for calibration
+  kelly_min_obs: 300              # need this many scored predictions before Kelly is applied
   filters:                        # reasons NOT to trade - every candidate must pass all of them
     min_stop_pct: 0.015           # stop closer than 1.5% of price = inside normal noise
     max_stop_pct: 0.10            # stop wider than 10% = too volatile for the risk budget
@@ -192,7 +210,8 @@ reviewer:                         # AI red-flag reviewer (Claude) - live trading
   price_out_per_mtok: 20.0
 
 execution:
-  broker: manual                  # manual (free: you place orders in your app) | kite (Zerodha Personal API)
+  broker: manual                  # manual (free: you place orders in your app) | paper (fake money, auto-filled
+                                  # against real next-day prices) | kite (Zerodha Personal API)
   dry_run: true                   # kite only: log orders instead of sending them
   limit_buffer: 0.005             # limit price = last close +0.5% for buys / -0.5% for sells
   stop_limit_buffer: 0.01         # stop-loss GTT: limit price 1% below the trigger so it fills on gaps
@@ -209,6 +228,7 @@ execution:
 
 desk:
   db_path: state/desk.db
+  paper_db_path: state/desk_paper.db   # used when execution.broker=paper (fake money never mixes with real)
   host: 127.0.0.1
   port: 8765
   journal_horizons: [5, 20]

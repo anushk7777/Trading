@@ -40,6 +40,13 @@ HYPOTHESES = {
     "circuit_risk": dict(sign=+1, mechanism="Stocks repeatedly pinned at NSE price bands are thinly traded / "
                          "operator-driven; their momentum is fragile and exits gap through stops.",
                          reference="indquant hypothesis (India-specific; must be validated by `indquant research`)"),
+    "insider_buying": dict(sign=+1, mechanism="Promoters and directors know their business best; open-market "
+                           "purchases with their own money signal they think the shares are undervalued.",
+                           reference="Seyhun (1986); Lakonishok & Lee (2001) 'Are insider trades informative?'"),
+    "smart_money": dict(sign=+1, mechanism="A few large investors have persistent stock-picking skill; following "
+                        "the disclosed buys of those whose record survives a false-discovery-rate test captures part "
+                        "of it.", reference="Barras, Scaillet & Wermers (2010) 'False discoveries in mutual fund "
+                        "performance'; Cohen, Polk & Silli (2010) 'Best ideas'"),
     "value": dict(sign=+1, mechanism="Risk premium for distressed firms and extrapolation errors by investors.",
                   reference="Fama & French (1992); Lakonishok, Shleifer & Vishny (1994)"),
 }

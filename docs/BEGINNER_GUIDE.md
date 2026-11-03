@@ -19,7 +19,7 @@ into a terminal and click buttons in your browser.
 | 3. [Practice on simulated data](#3-practice-run-on-simulated-data-no-internet-needed) | Run a backtest, learn to read the report | 15 min |
 | 4. [Test on real NSE data](#4-test-the-strategy-on-real-nse-data) | Download history, check data, run the real backtest | 1–2 hours |
 | 5. [Decide: go or no-go](#5-go-or-no-go-reading-the-results-honestly) | Compare the results with a checklist | 30 min |
-| 6. [Paper trade](#6-paper-trade-for-at-least-6-months) | Let it trade with fake money every day | **6+ months** |
+| 6. [Paper trade](#6-paper-trade-for-at-least-6-months) | Fake money: the console from tomorrow, plus the automatic book | **6+ months** |
 | 7. [Prepare for real money](#7-prepare-for-real-money) | Broker account, capital, optional AI reviewer | 1 day |
 | 8. [Your first real trade](#8-your-first-real-trade-step-by-step) | Console → approve → broker app → stop-loss | 2 days |
 | 9. [Daily and weekly routine](#9-daily-and-weekly-routine) | 10 minutes each evening | ongoing |
@@ -201,6 +201,22 @@ indquant backtest --with-research --null-test 19
 takes several minutes (it re-trains the machine-learning models through history the way
 they would have been trained at the time) and writes a report like the one in step 3.
 
+### 4.4 Optional: smart-money data (bulk deals and insider buying)
+
+indquant can follow public "smart money" disclosures: bulk deals (large trades, with the
+buyer's name) and promoters or directors buying their own company's shares. It only follows
+bulk-deal buyers whose past record survives a statistical luck test.
+
+```bash
+indquant disclosures fetch --since 2018-01-01   # tries NSE's website; may be blocked
+indquant smart-money                             # who passes the luck test, recent insider buying
+```
+
+If the fetch is blocked, download the CSV files yourself from nseindia.com (bulk deals, and
+insider trading under "Corporate filings") and import them:
+`indquant disclosures import --bulk bulk.csv --insider insider.csv`. Then re-run step 4.3:
+`research` tells you whether these signals actually worked in Indian data.
+
 ---
 
 ## 5. Go or no-go: reading the results honestly
@@ -229,7 +245,37 @@ fund is the honest conclusion, and that is a good outcome, because the tool has 
 ## 6. Paper trade for at least 6 months
 
 Paper trading runs the strategy every day on real prices with fake money. It is the only
-way to see how the system behaves *after* the backtest ended.
+way to see how the system behaves *after* the backtest ended. There are two ways; you can
+run both at the same time.
+
+### 6.1 Practise with the real buttons, using fake money (you can start tomorrow)
+
+This uses the same Trade Desk console you will use for real money. Instead of you placing
+orders at a broker, indquant fills them **automatically against the next day's real NSE
+prices**, with realistic costs and its stop-loss/target rules.
+
+**Tonight (after about 7 pm):**
+```bash
+indquant fetch                                   # bring prices up to date
+indquant --set execution.broker=paper console    # browser opens; the header says "PAPER - fake money"
+```
+Click **Refresh plan**, read the plan, and **Approve** the trades you like. They show
+"Fills automatically at the next session's open".
+
+**Tomorrow evening:** run the same two commands and click **Refresh plan** again. You will see:
+* *"Paper fill: BUY 19 TCS @ ₹4,012.60"* when the open was within your limit, or *"not filled:
+  limit not reached"* when the stock opened above it (gap-up), just like a real limit order;
+* new positions with their paper stop-loss and target, which are checked automatically every day;
+* *"Paper GTT fired …"* when a stop or target was hit.
+
+The fake-money book lives in its own file (`state/desk_paper.db`) and never mixes with real
+trades. To make it permanent, set `execution: {broker: paper}` in `config/my.yaml`.
+
+> **Be honest with yourself:** tomorrow tests the *workflow*, not the strategy. One day, or
+> even one month, of results is mostly luck. Judge the system after months, using
+> `paper-report` and the drift alerts.
+
+### 6.2 The fully automatic paper book
 
 ```bash
 indquant paper-init --variant champion
@@ -433,6 +479,8 @@ Prefer the terminal to the browser? Every button has a command: `indquant desk s
 | AI column says **REVIEW** | No API key or the AI was unavailable. Read the stock's latest news yourself before approving. |
 | Broker rejects: insufficient funds | Add funds, or reduce the quantity when approving (`indquant desk approve ID --qty N`). |
 | Order only partly executed | Mark filled with the quantity that actually executed. |
+| Paper order "not filled: limit not reached" | The stock opened above your limit (a gap-up). That is realistic; nothing to do. |
+| Fake-money desk shows old trades / want a fresh start | Close the console and delete `state/desk_paper.db` (only the fake-money book). |
 | A stock had a split or bonus | Nothing to do in indquant (it adjusts automatically and tells you), but **update the GTT** at your broker as the console says. |
 | I want to start the desk over | Close the console and delete `state/desk.db` (this erases the desk's records). |
 

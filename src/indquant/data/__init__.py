@@ -28,6 +28,8 @@ def load_market_data(cfg, as_of=None, refresh: bool = False) -> MarketData:
         data = _load_real(cfg, refresh=refresh)
     if src != "synthetic" and cfg.data.extra_benchmarks:
         data.extra_benchmarks = _extra_benchmarks(cfg, data.dates, refresh)
+    if cfg.smart_money.enabled:
+        data.alt_data = _disclosures(cfg, data, refresh)
     if as_of is not None:
         data = data.truncate(as_of)
     if cfg.general.end:
@@ -160,3 +162,47 @@ def _extra_benchmarks(cfg, calendar, refresh: bool) -> dict:
         log.warning("Extra benchmarks unavailable: %s", exc)
         return {}
     return {k: v["Close"].reindex(calendar).ffill() for k, v in recs.items()}
+
+
+def _disclosures(cfg, data, refresh: bool) -> dict:
+    """Public smart-money disclosures (bulk deals, insider trades) keyed by publication date."""
+    from .disclosures import fetch_recent, generate_synthetic_disclosures, load_disclosures
+
+    sm = cfg.smart_money
+    if data.source == "synthetic":
+        alt = generate_synthetic_disclosures(data, seed=int(cfg.general.seed)) if cfg.data.synthetic.disclosures else {}
+    else:
+        if sm.auto_fetch:
+            _maybe_fetch_disclosures(cfg, fetch_recent, refresh)
+        alt = load_disclosures(cfg)
+    if alt:
+        alt["params"] = {k: sm[k] for k in ("insider_lookback", "deal_lookback", "skill_horizon", "min_deals",
+                                             "fdr_q", "shrink_n")}
+    return alt
+
+
+def _maybe_fetch_disclosures(cfg, fetch_recent, refresh: bool) -> None:
+    """Fetch only the missing recent days, at most once every 6 hours (NSE may block automated access)."""
+    import time
+    from datetime import date, timedelta
+    from pathlib import Path
+
+    marker = Path(cfg.smart_money.bulk_deals_file).parent / ".last_fetch"
+    if not refresh and marker.exists() and time.time() - marker.stat().st_mtime < 6 * 3600:
+        return
+    since = date.today() - timedelta(days=30)
+    store = Path(cfg.smart_money.bulk_deals_file)
+    if store.exists() and not refresh:
+        try:
+            newest = pd.read_csv(store, usecols=["public_date"], parse_dates=["public_date"])["public_date"].max()
+            if pd.notna(newest):
+                since = max(since, newest.date() + timedelta(days=1))
+        except Exception:
+            pass
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    if since <= date.today():
+        try:
+            fetch_recent(cfg, since=since)
+        except Exception as exc:  # optional data: never block loading prices
+            log.warning("Disclosure fetch failed: %s", exc)

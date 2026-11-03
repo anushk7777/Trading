@@ -68,6 +68,56 @@ def cmd_fetch(args) -> int:
     return 0
 
 
+def cmd_disclosures(args) -> int:
+    from datetime import date
+
+    from .data.disclosures import fetch_recent, import_files
+
+    cfg = _cfg(args)
+    if args.disc_cmd == "import":
+        if not (args.bulk or args.insider):
+            print("Give --bulk FILE and/or --insider FILE (CSV exports from nseindia.com).")
+            return 1
+        added = import_files(cfg, args.bulk, args.insider)
+    else:
+        since = date.fromisoformat(args.since) if args.since else None
+        added = fetch_recent(cfg, since=since)
+    print(f"New rows stored: {added} -> {cfg.smart_money.bulk_deals_file}, {cfg.smart_money.insider_file}")
+    return 0
+
+
+def cmd_smart_money(args) -> int:
+    from .features.smart_money import smart_money
+
+    cfg = _cfg(args)
+    data = _load(cfg, args)
+    alt = data.alt_data or {}
+    if alt.get("bulk") is None and alt.get("insider") is None:
+        print("No disclosure data yet. Run `indquant disclosures fetch --since 2018-01-01` or import CSV exports "
+              "with `indquant disclosures import --bulk bulk.csv --insider insider.csv`.")
+        return 1
+    with pd.option_context("display.width", 160, "display.float_format", "{:,.3f}".format):
+        if alt.get("bulk") is not None and len(alt["bulk"]):
+            _, tab = smart_money(data, alt["bulk"], alt["params"])
+            print(f"Bulk-deal clients tested: {len(tab)}; skilled after false-discovery control "
+                  f"(q <= {cfg.smart_money.fdr_q}): {int(tab['selected'].sum()) if len(tab) else 0}")
+            if len(tab):
+                print(tab.head(int(args.top)).rename(columns={"mean": "avg_excess_63d"}).to_string())
+            recent = alt["bulk"][alt["bulk"]["public_date"] >= data.dates[-1] - pd.Timedelta(days=14)]
+            skilled = set(tab.index[tab["selected"]]) if len(tab) else set()
+            hits = recent[recent["client"].isin(skilled)]
+            print(f"\nSkilled-client deals in the last 14 days: {len(hits)}")
+            if len(hits):
+                print(hits[["public_date", "symbol", "client", "side", "value"]].to_string(index=False))
+        if alt.get("insider") is not None and len(alt["insider"]):
+            ins = alt["insider"][alt["insider"]["public_date"] >= data.dates[-1] - pd.Timedelta(days=30)]
+            buys = ins[ins["side"] > 0].groupby("symbol")["value"].sum().sort_values(ascending=False)
+            print(f"\nInsider open-market net buying, last 30 days (top {int(args.top)}):")
+            print(buys.head(int(args.top)).to_string() if len(buys) else "none")
+    print("\nThese feed the `smart_money` and `insider_buying` factors; check `indquant research` before trusting them.")
+    return 0
+
+
 def cmd_data_audit(args) -> int:
     from .data.audit import compare_sources, suspicious_moves
     from .data.yahoo import download_prices
@@ -395,7 +445,8 @@ def _make_desk(cfg):
     from .live.desk import DeskStore, TradeDesk, _Cache
     from .review.reviewer import RedFlagReviewer
 
-    store = DeskStore(cfg.desk.db_path)
+    # fake-money desk keeps its own book so it can never mix with real trades
+    store = DeskStore(cfg.desk.paper_db_path if cfg.execution.broker == "paper" else cfg.desk.db_path)
     reviewer = RedFlagReviewer(cfg, cache=_Cache(store)) if cfg.reviewer.enabled else None
     return TradeDesk(cfg, store=store, reviewer=reviewer)
 
@@ -538,6 +589,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("fetch", help="download / refresh universe and prices").set_defaults(func=cmd_fetch)
+
+    di = sub.add_parser("disclosures", help="bulk deals / insider trades: import NSE CSV exports or fetch")
+    dsub2 = di.add_subparsers(dest="disc_cmd", required=True)
+    imp = dsub2.add_parser("import")
+    imp.add_argument("--bulk", default=None, help="bulk-deals CSV/JSON exported from nseindia.com")
+    imp.add_argument("--insider", default=None, help="insider-trading (PIT) CSV/JSON exported from nseindia.com")
+    fe = dsub2.add_parser("fetch")
+    fe.add_argument("--since", default=None, help="YYYY-MM-DD (default: last 30 days)")
+    di.set_defaults(func=cmd_disclosures)
+
+    sm = sub.add_parser("smart-money", help="skilled bulk-deal clients (luck-corrected) and recent insider buying")
+    sm.add_argument("--top", type=int, default=15)
+    sm.set_defaults(func=cmd_smart_money)
 
     da = sub.add_parser("data-audit", help="cross-check NSE vs Yahoo prices and flag suspicious moves")
     da.add_argument("--symbols", type=int, default=100, help="number of liquid stocks to cross-check")

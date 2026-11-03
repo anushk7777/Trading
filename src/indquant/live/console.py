@@ -242,7 +242,7 @@ return `<tr><td colspan="10" class="details"><b>${esc(r.summary)}</b>${r.injecti
 ${f?'<ul>'+f+'</ul>':''}${h?'<details><summary>Headlines reviewed</summary><ol style="list-style:none;padding-left:0">'+h+'</ol></details>':''}
 <div class="muted">${esc(r.model||'')}${r.challenged?' · veto challenged by second reviewer':''}</div></td></tr>`}
 function render(){if(!S)return;document.getElementById('date').textContent='Data: '+(S.data_date||'never refreshed');
-const b=document.getElementById('broker');b.textContent=S.broker==='manual'?'Manual broker (you place orders)':(S.dry_run?'Zerodha · DRY RUN':'Zerodha · LIVE');
+const b=document.getElementById('broker');b.textContent=S.broker==='manual'?'Manual broker (you place orders)':S.broker==='paper'?'PAPER - fake money':(S.dry_run?'Zerodha · DRY RUN':'Zerodha · LIVE');
 b.className='pill'+(S.broker!=='manual'&&!S.dry_run?' live':'');
 document.getElementById('ai').textContent=S.reviewer.enabled?`AI reviewer: ${S.reviewer.model} · $${S.ai_cost_usd.last_day_usd} today`:'AI reviewer off';
 const kb=document.getElementById('killBtn');kb.textContent=S.kill?'RESUME trading':'STOP ALL';kb.className=S.kill?'ok big':'danger big';
@@ -258,6 +258,7 @@ const P=S.proposals;document.getElementById('plan').innerHTML=!P.length?'<div cl
 P.map(p=>{const st=p.stop_dist?p.ref_price-p.stop_dist:null,tg=p.target_dist?p.ref_price+p.target_dist:null;let a='';
 if(p.status==='pending')a=`<button class="ok" onclick="approve(${p.id})">Approve</button> <button onclick="act('skip',{id:${p.id}})">Skip</button>`;
 else if(p.status==='blocked_ai')a=`<button onclick="approve(${p.id})">Override…</button> <button onclick="act('skip',{id:${p.id}})">Skip</button>`;
+else if(S.broker==='paper'&&p.status==='submitted')a=`<span class="note">Fills automatically at the next session's open</span> <button onclick="act('cancel',{id:${p.id}})">Cancel</button>`;
 else if(['awaiting_fill','submitted','dry_run'].includes(p.status))a=`<span>Qty <input id="q${p.id}" value="${p.qty}"> @ ₹<input id="p${p.id}" placeholder="fill price"></span> <button class="ok" onclick="fill(${p.id})">Mark filled</button> <button onclick="act('cancel',{id:${p.id}})">Cancel</button>`;
 else a=`<span class="chip VETO">${esc(p.status)}</span><div class="note">${esc(p.message)}</div>`;
 const inst=['awaiting_fill','submitted','dry_run'].includes(p.status)&&p.message?`<tr><td colspan="10" class="inst note">➜ ${esc(p.message)}</td></tr>`:'';

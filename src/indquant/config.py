@@ -119,6 +119,8 @@ def validate(cfg: Config) -> None:
         raise ValueError("core.weighting must be 'equal' or 'inverse_vol'")
     if cfg.swing.stop_atr <= 0 or cfg.swing.target_atr <= 0:
         raise ValueError("swing.stop_atr and swing.target_atr must be positive")
+    if cfg.execution.broker not in ("manual", "paper", "kite"):
+        raise ValueError("execution.broker must be manual, paper or kite")
     if cfg.data.source not in ("yahoo", "csv", "synthetic", "nse"):
         raise ValueError("data.source must be yahoo, nse, csv or synthetic")
     if not 0 <= cfg.core.ml_weight <= 1:
