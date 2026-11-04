@@ -116,7 +116,7 @@ actually predicts returns before giving it more weight.
 git clone <this repo> && cd Trading
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -e ".[dev,ai]"          # add ",kite" for the optional Zerodha adapter
-pytest                                                  # 117 tests, ~2 min
+pytest                                                  # 120 tests, ~2 min
 ```
 
 Python ≥ 3.10. Dependencies: numpy, pandas, scipy, scikit-learn, lightgbm, cvxpy, yfinance,

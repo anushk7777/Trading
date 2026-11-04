@@ -53,3 +53,52 @@ def test_known_weekend_sessions_are_downloaded(tmp_path):
     download_range(date(2020, 1, 31), date(2020, 2, 3), tmp_path, fetch=fetch, pause=0)
     assert date(2020, 2, 1) in SPECIAL_SESSIONS
     assert bhavcopy_url(date(2020, 2, 1)) in asked and bhavcopy_url(date(2020, 2, 2)) not in asked
+
+
+def _raw_with_bonus(seed=2):
+    close, _, _, _ = _panel(n_days=80, n_sym=3, seed=seed)
+    d = close.index[40]
+    close.loc[d:, "S00"] *= 0.5                                     # 1:1 bonus: raw exchange price halves
+    open_ = close * 0.999
+    ref = {s: close[s].copy() for s in close.columns}
+    ref["S00"].loc[:close.index[39]] *= 0.5                         # reference is split-adjusted
+    return close, open_, ref, d
+
+
+def test_reference_finds_the_bonus_but_not_bad_ticks_or_phantom_splits():
+    from indquant.data.nse_bhavcopy import reference_split_events
+
+    close, open_, ref, d = _raw_with_bonus()
+    ref["S01"].iloc[60] *= 1.12                                     # one-day bad tick in the reference
+    ref["S02"].loc[:close.index[30]] *= 0.5                         # reference "split" that never happened
+    ev, covered = reference_split_events(close, open_, ref)
+    assert covered == {"S00", "S01", "S02"}
+    assert ev[["symbol", "ex_date"]].values.tolist() == [["S00", d]]
+    assert abs(ev["factor"].iloc[0] - 0.5) < 1e-9
+
+
+def test_merge_prefers_reference_and_drops_heuristic_false_alarms():
+    from indquant.data.nse_bhavcopy import merge_actions, reference_split_events
+
+    close, open_, ref, d = _raw_with_bonus()
+    ref_ev, covered = reference_split_events(close, open_, ref)
+    detected = pd.DataFrame([
+        ("S00", d, 0.5, "gap_heuristic"),                          # duplicate of the reference event
+        ("S01", close.index[50], 0.93, "exchange_prev_close"),     # covered, but no move in the reference
+        ("ZZZ", close.index[20], 0.5, "gap_heuristic"),            # stock the reference does not cover
+    ], columns=["symbol", "ex_date", "factor", "source"])
+    out = merge_actions(detected, ref_ev, covered, close, ref)
+    assert out[["symbol", "source"]].values.tolist() == [["S00", "yahoo_crosscheck"], ["ZZZ", "gap_heuristic"]]
+
+
+def test_heuristic_split_survives_when_the_reference_missed_it():
+    from indquant.data.nse_bhavcopy import merge_actions, reference_split_events
+
+    close, open_, ref, _ = _raw_with_bonus()
+    e = close.index[55]
+    close.loc[e:, "S01"] *= 0.5                                     # real 1:1 split ...
+    ref["S01"].loc[e:] *= 0.5                                       # ... that the reference never adjusted
+    ref_ev, covered = reference_split_events(close, close * 0.999, ref)
+    detected = pd.DataFrame([("S01", e, 0.5, "gap_heuristic")], columns=["symbol", "ex_date", "factor", "source"])
+    out = merge_actions(detected, ref_ev, covered, close, ref)
+    assert ("S01", e) in set(zip(out["symbol"], out["ex_date"]))

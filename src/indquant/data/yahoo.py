@@ -65,6 +65,7 @@ def download_prices(
     refresh: bool = False,
     chunk: int = 40,
     adjust_dividends: bool = True,
+    quiet: bool = False,
 ) -> dict[str, pd.DataFrame]:
     """Return {symbol: OHLCV frame}. Symbols without data are skipped with a warning.
 
@@ -84,6 +85,7 @@ def download_prices(
         else:
             todo.append(sym)
 
+    missing: list[str] = []
     for i in range(0, len(todo), chunk):
         batch = todo[i:i + chunk]
         ysyms = [yahoo_symbol(s) for s in batch]
@@ -107,10 +109,13 @@ def download_prices(
                     log.warning("No fresh data for %s; using stale cache", sym)
                     out[sym] = pd.read_parquet(stale)
                 else:
-                    log.warning("No data for %s (%s) - skipped", sym, ysym)
+                    (log.debug if quiet else log.warning)("No data for %s (%s) - skipped", sym, ysym)
+                    missing.append(sym)
                 continue
             df.to_parquet(_cache_path(cache, sym + suffix))
             out[sym] = df
+    if quiet and missing:
+        log.info("Yahoo has no data for %d of %d symbols (mostly delisted) - skipped", len(missing), len(symbols))
     if start:
         out = {k: v.loc[pd.Timestamp(start):] for k, v in out.items()}
     if end:

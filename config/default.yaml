@@ -49,6 +49,7 @@ nse:                              # data.source=nse: exchange bhavcopies incl. d
   min_listing_days: 252
   ca_threshold: 0.03              # PREVCLOSE/CLOSE(t-1) deviation treated as a split/bonus
   apply_gap_heuristic: true       # fallback: clean-ratio overnight gaps (1/2, 1/5 ...) with a volume jump
+  yahoo_crosscheck: true          # confirm splits/bonuses/demergers against Yahoo's split-adjusted history
   corporate_actions_file: null    # CSV symbol,ex_date,factor - overrides detection (factor 1 cancels one)
   dividends_file: null            # CSV symbol,ex_date,amount - makes prices total-return
   sector_file: null               # CSV symbol,sector - sectors for historical / delisted names

@@ -96,7 +96,8 @@ def _fetch(files):
 def _cfg(tmp_path, **extra):
     o = {"data.source": "nse", "general.start": str(START), "general.end": str(END),
          "nse.raw_dir": str(tmp_path / "nse" / "raw"), "nse.universe_size": 3, "nse.universe_lookback": 5,
-         "nse.min_listing_days": 5, "nse.request_pause": 0, "data.cache_dir": str(tmp_path / "cache")}
+         "nse.min_listing_days": 5, "nse.request_pause": 0, "data.cache_dir": str(tmp_path / "cache"),
+         "nse.yahoo_crosscheck": False}
     o.update(extra)
     return load_config(overrides=o)
 

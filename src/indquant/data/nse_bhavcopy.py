@@ -324,6 +324,62 @@ def detect_actions(close: pd.DataFrame, prev_close: pd.DataFrame, open_: pd.Data
     return pd.DataFrame(rows, columns=["symbol", "ex_date", "factor", "source"])
 
 
+def reference_split_events(close: pd.DataFrame, open_: pd.DataFrame, ref: dict[str, pd.Series],
+                           tol: float = 0.03, window: int = 5) -> tuple[pd.DataFrame, set]:
+    """Splits / bonuses / demergers from a split-adjusted second source (Yahoo, dividends excluded).
+
+    k = reference / our raw close is constant except on an ex-date, where it steps by the
+    adjustment factor. A step counts only if (1) k is stable for ``window`` days before and after
+    (so a bad tick in the reference cannot create one) and (2) our own raw prices gap by about the
+    same factor that day (so a wrong split record in the reference cannot either).
+    Returns (events, symbols the reference covers)."""
+    rows, covered = [], set()
+    last_close = close.ffill().shift(1)
+    for sym, r in ref.items():
+        if sym not in close.columns or r is None:
+            continue
+        both = pd.concat([close[sym].rename("raw"), r.rename("ref")], axis=1, join="inner").dropna()
+        both = both[(both["raw"] > 0) & (both["ref"] > 0)]
+        if len(both) < 4 * window:
+            continue
+        covered.add(sym)
+        lk = np.log(both["ref"] / both["raw"])
+        before = lk.rolling(window, min_periods=3).median().shift(1)
+        after = lk[::-1].rolling(window, min_periods=3).median()[::-1]
+        jump = lk.diff().abs() > np.log(1 + tol)
+        ok = jump & ((after - before).abs() > np.log(1 + tol)) & ((lk - after).abs() < 0.01) \
+            & ((lk.shift(1) - before).abs() < 0.01)
+        for d in lk.index[ok.to_numpy()]:
+            factor = float(np.exp(before[d] - after[d]))
+            gap = open_.at[d, sym] / last_close.at[d, sym] if d in open_.index else np.nan
+            if np.isfinite(gap) and gap > 0 and abs(np.log(gap / factor)) < np.log(1.25):
+                rows.append((sym, d, factor, "yahoo_crosscheck"))
+    return pd.DataFrame(rows, columns=["symbol", "ex_date", "factor", "source"]), covered
+
+
+def merge_actions(detected: pd.DataFrame, reference: pd.DataFrame, covered: set, close: pd.DataFrame,
+                  ref: dict[str, pd.Series], tol: float = 0.03) -> pd.DataFrame:
+    """Reference events win; a heuristic event on a covered stock survives only if the reference
+    itself shows the same gap that day (i.e. the reference missed it) and no reference event is near."""
+    if not covered:
+        return detected
+    keep = []
+    for row in detected.itertuples(index=False):
+        if row.symbol not in covered:
+            keep.append(True)
+            continue
+        near = reference[(reference["symbol"] == row.symbol)
+                         & ((reference["ex_date"] - row.ex_date).abs() <= pd.Timedelta(days=5))]
+        r = ref[row.symbol]
+        k = int(r.index.searchsorted(row.ex_date))
+        ref_move = r.iloc[k] / r.iloc[k - 1] if 0 < k < len(r) and r.index[k] == row.ex_date else np.nan
+        missed_by_ref = np.isfinite(ref_move) and abs(np.log(ref_move / row.factor)) < np.log(1.25) \
+            and abs(ref_move - 1) > tol
+        keep.append(near.empty and missed_by_ref)
+    out = pd.concat([detected[keep], reference], ignore_index=True)
+    return out.sort_values(["symbol", "ex_date"]).reset_index(drop=True)
+
+
 def adjust_prices(frames: dict[str, pd.DataFrame], actions: pd.DataFrame,
                   dividends: pd.DataFrame | None = None) -> dict[str, pd.DataFrame]:
     """Back-adjust OHLC (and volume) for the given actions; optional dividends make it total-return."""
@@ -368,8 +424,33 @@ def point_in_time_universe(value: pd.DataFrame, close: pd.DataFrame, size: int, 
 
 
 # ------------------------------------------------------------------------- entry point
-def load_nse_panel(cfg, refresh: bool = False, fetch=_http_get) -> dict:
-    """Download (if needed) and build adjusted panels + membership. Returns dict of frames and logs."""
+def _yahoo_reference(cfg, symbols: list[str], refresh: bool) -> dict[str, pd.Series]:
+    """Split-adjusted (not dividend-adjusted) Yahoo closes used to cross-check corporate actions."""
+    try:
+        from .yahoo import download_prices
+
+        log.info("Cross-checking splits/bonuses of %d stocks against Yahoo (cached for %sh)...", len(symbols),
+                 cfg.data.cache_max_age_hours)
+        yf_log = logging.getLogger("yfinance")
+        level = yf_log.level
+        yf_log.setLevel(logging.CRITICAL)                 # delisted tickers are expected, don't alarm
+        try:
+            recs = download_prices(symbols, str(cfg.general.start), cfg.general.end, cfg.data.cache_dir,
+                                   max_age_hours=float(cfg.data.cache_max_age_hours), refresh=refresh,
+                                   adjust_dividends=False, quiet=True)
+        finally:
+            yf_log.setLevel(level)
+        return {k: v["Close"] for k, v in recs.items()}
+    except Exception as exc:  # the cross-check is an extra; never block loading on it
+        log.warning("Yahoo split cross-check unavailable (%s); using exchange data only.", exc)
+        return {}
+
+
+def load_nse_panel(cfg, refresh: bool = False, fetch=_http_get, reference=None) -> dict:
+    """Download (if needed) and build adjusted panels + membership. Returns dict of frames and logs.
+
+    ``reference``: {symbol: split-adjusted close} to cross-check corporate actions; by default
+    Yahoo for every stock that was ever in the point-in-time universe (``nse.yahoo_crosscheck``)."""
     n = cfg.nse
     raw_dir = Path(n.raw_dir)
     start = pd.Timestamp(cfg.general.start).date()
@@ -395,6 +476,17 @@ def load_nse_panel(cfg, refresh: bool = False, fetch=_http_get) -> dict:
 
     detected = detect_actions(frames["close"], frames["prev_close"], frames["open"], frames["volume"],
                               float(n.ca_threshold), bool(n.apply_gap_heuristic))
+    membership = point_in_time_universe(frames["value"], frames["close"], int(n.universe_size),
+                                        int(n.universe_lookback), int(n.min_listing_days))
+    if reference is None and bool(n.yahoo_crosscheck):
+        reference = _yahoo_reference(cfg, list(membership.columns[membership.any().to_numpy()]), refresh)
+    if reference:
+        ref_events, covered = reference_split_events(frames["close"], frames["open"], reference,
+                                                     float(n.ca_threshold))
+        detected = merge_actions(detected, ref_events, covered, frames["close"], reference, float(n.ca_threshold))
+        log.info("Corporate actions: %d confirmed by the Yahoo cross-check (%d stocks covered), %d from exchange "
+                 "data only.", int((detected["source"] == "yahoo_crosscheck").sum()), len(covered),
+                 int((detected["source"] != "yahoo_crosscheck").sum()))
     overrides = _load_overrides(n.corporate_actions_file)
     if len(overrides):
         key = set(zip(overrides["symbol"], overrides["ex_date"]))
@@ -411,7 +503,5 @@ def load_nse_panel(cfg, refresh: bool = False, fetch=_http_get) -> dict:
     adjusted = adjust_prices(frames, actions, dividends)
     log_path = raw_dir.parent / "corporate_actions_detected.csv"
     actions.sort_values(["symbol", "ex_date"]).to_csv(log_path, index=False)
-    membership = point_in_time_universe(frames["value"], frames["close"], int(n.universe_size),
-                                        int(n.universe_lookback), int(n.min_listing_days))
     return {"frames": adjusted, "membership": membership, "actions": actions, "renames": renames,
             "dividends_included": dividends is not None, "actions_log": log_path}
