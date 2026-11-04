@@ -118,6 +118,28 @@ def test_download_caches_and_remembers_holidays(tmp_path, market_files):
     assert again["downloaded"] == 0 and again["cached"] == len(market_files)
 
 
+def test_download_gives_up_when_blocked_and_resumes(tmp_path, market_files, caplog):
+    import urllib.error
+
+    from indquant.data import nse_bhavcopy as nb
+
+    calls = []
+
+    def blocked(url):
+        calls.append(url)
+        raise urllib.error.URLError("connection refused")
+
+    with caplog.at_level("INFO", logger="indquant.data.nse_bhavcopy"):
+        stats = download_range(START, END + timedelta(days=200), tmp_path / "raw", fetch=blocked, pause=0)
+    assert stats["failed"] == len(calls) == nb.MAX_CONSECUTIVE_FAILURES       # stopped early, not 140 tries
+    assert any("probably blocking" in r.getMessage() for r in caplog.records)
+    assert not list((tmp_path / "raw").glob("*.part"))
+    with caplog.at_level("INFO", logger="indquant.data.nse_bhavcopy"):
+        ok = download_range(START, END, tmp_path / "raw", fetch=_fetch(market_files), pause=0)
+    assert ok["downloaded"] == len(market_files)
+    assert any("files done" in r.getMessage() for r in caplog.records)      # progress is shown
+
+
 def test_panel_adjusts_actions_stitches_renames_keeps_delisted(tmp_path, market_files, monkeypatch):
     cfg = _cfg(tmp_path)
     panel = load_nse_panel(cfg, refresh=True, fetch=_fetch(market_files))

@@ -70,39 +70,70 @@ def _http_get(url: str, timeout: int = 30) -> bytes:
         return resp.read()
 
 
-def download_range(start: date, end: date, raw_dir: str | Path, fetch=_http_get, pause: float = 0.35) -> dict:
-    """Fetch every weekday in [start, end] not already cached. Returns counts."""
+MAX_CONSECUTIVE_FAILURES = 15
+
+
+def download_range(start: date, end: date, raw_dir: str | Path, fetch=_http_get, pause: float = 0.35,
+                   progress_every: float = 15.0) -> dict:
+    """Fetch every weekday in [start, end] not already cached. Returns counts.
+
+    Prints progress every ``progress_every`` seconds, writes each file atomically (Ctrl+C is safe:
+    re-running resumes) and gives up early when every request fails (blocked network)."""
     raw = Path(raw_dir)
     raw.mkdir(parents=True, exist_ok=True)
     missing_file = raw / "missing_days.txt"
     missing = set(missing_file.read_text().split()) if missing_file.exists() else set()
     today = date.today()
     stats = {"downloaded": 0, "cached": 0, "holidays": 0, "failed": 0}
-    d = start
-    while d <= end:
-        if d.weekday() < 5:
-            key = f"{d:%Y%m%d}"
-            path = raw / f"{key}.csv.zip"
-            if path.exists():
-                stats["cached"] += 1
-            elif key in missing and (today - d).days > 7:
+    days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+    days = [d for d in days if d.weekday() < 5]
+    todo = [d for d in days if not (raw / f"{d:%Y%m%d}.csv.zip").exists()
+            and not (f"{d:%Y%m%d}" in missing and (today - d).days > 7)]
+    stats["cached"] = sum((raw / f"{d:%Y%m%d}.csv.zip").exists() for d in days)
+    stats["holidays"] = len(days) - stats["cached"] - len(todo)
+    if not todo:
+        return stats
+    log.info("Downloading %d NSE daily price files (%s to %s) into %s. %s", len(todo), todo[0], todo[-1], raw,
+             ("First time: about 30-60 minutes. " if stats["cached"] < 50 else "")
+             + "Safe to stop with Ctrl+C; run the same command again to resume.")
+    t0 = last = time.monotonic()
+    streak = 0
+    for n, d in enumerate(todo, 1):
+        key = f"{d:%Y%m%d}"
+        path = raw / f"{key}.csv.zip"
+        try:
+            body = fetch(bhavcopy_url(d))
+            tmp = path.with_suffix(".part")
+            tmp.write_bytes(body)
+            tmp.replace(path)                                 # never leaves a half-written file behind
+            stats["downloaded"] += 1
+            streak = 0
+            time.sleep(pause)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:                               # market holiday: no file that day
+                missing.add(key)
                 stats["holidays"] += 1
+                streak = 0
             else:
-                try:
-                    path.write_bytes(fetch(bhavcopy_url(d)))
-                    stats["downloaded"] += 1
-                    time.sleep(pause)
-                except urllib.error.HTTPError as exc:
-                    if exc.code == 404:
-                        missing.add(key)
-                        stats["holidays"] += 1
-                    else:
-                        stats["failed"] += 1
-                        log.warning("Bhavcopy %s: HTTP %s", d, exc.code)
-                except Exception as exc:  # network trouble: keep going, retry next run
-                    stats["failed"] += 1
-                    log.warning("Bhavcopy %s failed: %s", d, exc)
-        d += timedelta(days=1)
+                stats["failed"] += 1
+                streak += 1
+                log.warning("Bhavcopy %s: HTTP %s", d, exc.code)
+        except Exception as exc:  # network trouble: keep going, retry next run
+            stats["failed"] += 1
+            streak += 1
+            log.warning("Bhavcopy %s failed: %s", d, exc)
+        if streak >= MAX_CONSECUTIVE_FAILURES:
+            log.error("Stopping: the last %d downloads all failed, so NSE is probably blocking this network "
+                      "(office/college Wi-Fi, VPN or firewall) or is down. Try another network or later, "
+                      "or use `--set data.source=yahoo`. Files already downloaded are kept.", streak)
+            break
+        now = time.monotonic()
+        if now - last >= progress_every or n == len(todo):
+            rate = (now - t0) / n
+            left = (len(todo) - n) * rate / 60
+            log.info("  %s: %d/%d files done (%d holidays, %d failed), about %.0f min left",
+                     d, n, len(todo), stats["holidays"], stats["failed"], left)
+            last = now
     missing_file.write_text("\n".join(sorted(missing)))
     return stats
 
