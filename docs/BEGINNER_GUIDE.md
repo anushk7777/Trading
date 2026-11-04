@@ -268,6 +268,11 @@ Click **Refresh plan**, read the plan, and **Approve** the trades you like. They
 * new positions with their paper stop-loss and target, which are checked automatically every day;
 * *"Paper GTT fired …"* when a stop or target was hit.
 
+**Approving during market hours** (say, at 1 pm, using yesterday's prices) is allowed, but
+the order fills at the **next** session's open, never at a price that already printed this
+morning, exactly like a real order placed at 1 pm. For the most up-to-date plan, refresh and
+approve in the evening.
+
 The fake-money book lives in its own file (`state/desk_paper.db`) and never mixes with real
 trades. To make it permanent, set `execution: {broker: paper}` in `config/my.yaml`.
 

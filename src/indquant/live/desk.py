@@ -22,8 +22,9 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -67,8 +68,22 @@ CREATE TABLE IF NOT EXISTS fills (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT 
 """
 
 
+IST = ZoneInfo("Asia/Kolkata")
+AMO_CUTOFF = time(9, 0)          # orders sent after this reach the exchange only in the NEXT session
+
+
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def first_eligible_session(approved_at: str | None) -> date | None:
+    """Earliest session an order approved at ``approved_at`` can trade in: the same day if it was sent
+    before the 09:00 IST pre-open (an AMO), otherwise the next day. Naive timestamps are local time."""
+    if not approved_at:
+        return None
+    t = datetime.fromisoformat(approved_at)
+    t = t.astimezone(IST) if t.tzinfo else t.astimezone().astimezone(IST)
+    return t.date() if t.time() < AMO_CUTOFF else t.date() + timedelta(days=1)
 
 
 class DeskStore:
@@ -77,6 +92,9 @@ class DeskStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.conn() as c:
             c.executescript(SCHEMA)
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(proposals)")}
+            if "approved_at" not in cols:                     # databases created before this column existed
+                c.execute("ALTER TABLE proposals ADD COLUMN approved_at TEXT")
 
     @contextmanager
     def conn(self):
@@ -383,7 +401,9 @@ class TradeDesk:
 
     # ------------------------------------------------------------------ actions
     def approve(self, pid: int, override_reason: str | None = None, qty: int | None = None,
-                limit_price: float | None = None) -> dict:
+                limit_price: float | None = None, when: datetime | None = None) -> dict:
+        """``when`` (default: now) is when the order is sent; a paper order sent after the 09:00 pre-open
+        can only fill in the following session, never at a price that has already printed."""
         p = self.store.proposal(pid)
         if p["status"] == "blocked_ai" and not override_reason:
             raise ValueError("AI reviewer vetoed this trade - approving needs an override reason")
@@ -408,7 +428,9 @@ class TradeDesk:
             self.store.event("risk_reject", id=pid, problems=problems)
             return {"status": "rejected_risk", "message": "; ".join(problems)}
         res = self.broker.submit(p)
-        self.store.update_proposal(pid, status=res["status"], broker_ref=res.get("ref"), message=res.get("message"))
+        sent = (when or datetime.now(IST)).isoformat(timespec="seconds")
+        self.store.update_proposal(pid, status=res["status"], broker_ref=res.get("ref"), message=res.get("message"),
+                                   approved_at=sent)
         self.store.event("approve", id=pid, symbol=p["symbol"], side=p["side"], qty=p["qty"],
                          limit=p["limit_price"], override=override_reason, broker=self.broker.name, result=res)
         if override_reason:
@@ -557,13 +579,17 @@ class TradeDesk:
 
     # ------------------------------------------------------------------ fake-money simulation
     def _simulate_paper(self, data, engine) -> list[str]:
-        """Paper broker: fill approved orders at the first session after their decision date and run
+        """Paper broker: fill approved orders at the first session after their decision date that the
+        order could really reach (approved at 1 pm -> tomorrow's open, not this morning's) and run
         paper GTT stop-loss / target checks bar by bar - the same rules as the backtest engine."""
         dates, msgs, fill_idx = data.dates, [], {}
         for p in self.store.proposals("status='submitted'"):
             k = int(dates.searchsorted(pd.Timestamp(p["data_date"]), side="right"))
+            earliest = first_eligible_session(p.get("approved_at") or p.get("updated"))
+            if earliest is not None:
+                k = max(k, int(dates.searchsorted(pd.Timestamp(earliest), side="left")))
             if k >= len(dates):
-                continue                                      # next session not in the data yet
+                continue                                      # that session is not in the data yet
             j = engine.col.get(p["symbol"])
             o = engine.O[k, j] if j is not None else np.nan
             if j is None or np.isnan(o):
