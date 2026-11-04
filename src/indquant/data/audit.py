@@ -22,9 +22,12 @@ def compare_sources(primary: pd.DataFrame, secondary: dict[str, pd.Series], tol:
         r = both.pct_change(fill_method=None).dropna()
         diff = (r.iloc[:, 0] - r.iloc[:, 1]).abs()
         bad = diff[diff > tol]
+        worst = diff.idxmax()
+        # the source showing the bigger one-day move is usually the one with the missed adjustment / bad tick
+        suspect = "ours" if abs(r.iloc[:, 0].loc[worst]) > abs(r.iloc[:, 1].loc[worst]) else "yahoo"
         rows.append({"symbol": sym, "days": len(r), "return_corr": float(r.iloc[:, 0].corr(r.iloc[:, 1])),
-                     "mismatch_days": int(len(bad)), "worst_date": str(diff.idxmax().date()),
-                     "worst_diff": float(diff.max()),
+                     "mismatch_days": int(len(bad)), "worst_date": str(worst.date()),
+                     "worst_diff": float(diff.max()), "likely_wrong": suspect if len(bad) else "",
                      "mismatch_dates": ", ".join(str(d.date()) for d in bad.index[:5])})
     df = pd.DataFrame(rows)
     return df.sort_values(["mismatch_days", "worst_diff"], ascending=False) if len(df) else df

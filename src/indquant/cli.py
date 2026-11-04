@@ -132,15 +132,17 @@ def cmd_data_audit(args) -> int:
           f"(saved to {out / 'suspicious_moves.csv'}); check them for missed splits/bonuses.")
     if data.source == "nse":
         last = data.membership.iloc[-1] if data.membership is not None else data.close.iloc[-1].notna()
-        symbols = list(last[last].index[: int(args.symbols)])
+        traded = (data.close * data.volume).iloc[-60:].mean()[last[last].index]
+        symbols = list(traded.sort_values(ascending=False).index[: int(args.symbols)])   # what we actually trade
         recs = download_prices(symbols, str(cfg.general.start), cfg.general.end, cfg.data.cache_dir,
-                               max_age_hours=float(cfg.data.cache_max_age_hours))
+                               max_age_hours=float(cfg.data.cache_max_age_hours), adjust_dividends=False)
         table = compare_sources(data.close, {s: r["Close"] for s, r in recs.items()})
         table.to_csv(out / "nse_vs_yahoo.csv", index=False)
         if len(table):
             bad = table[table["mismatch_days"] > 0]
-            print(f"\nNSE vs Yahoo on {len(table)} stocks: median return correlation "
-                  f"{table['return_corr'].median():.3f}; {len(bad)} stocks with mismatching days (>5%).")
+            print(f"\nNSE vs Yahoo (both split-adjusted, without dividends) on the {len(table)} most traded stocks: "
+                  f"median return correlation {table['return_corr'].median():.3f}; {len(bad)} stocks with "
+                  f"mismatching days (>5%). 'likely_wrong' = the source with the implausible move on the worst day.")
             with pd.option_context("display.width", 160, "display.max_colwidth", 60):
                 print(bad.head(20).to_string(index=False))
             print("\nFix a wrong adjustment by adding a row to nse.corporate_actions_file (factor 1 cancels one).")

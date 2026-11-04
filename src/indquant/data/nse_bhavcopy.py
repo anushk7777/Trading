@@ -53,6 +53,12 @@ ALIASES = {
     "isin": ["ISIN"],
     "instrument": ["FININSTRMTP"],
 }
+# Weekend sessions NSE held (Budget days, Diwali Muhurat, special live sessions). A missing session
+# makes every stock's PREVCLOSE differ from our last close the next day, which would look like
+# thousands of tiny "splits". Unknown future ones are caught by the market-wide check below.
+SPECIAL_SESSIONS = {date.fromisoformat(d) for d in (
+    "2015-02-28", "2016-10-30", "2019-10-27", "2020-02-01", "2020-11-14", "2023-11-12",
+    "2024-01-20", "2024-03-02", "2024-05-18", "2025-02-01", "2026-02-01", "2026-11-08")}
 CLEAN_RATIOS = np.array([1 / 2, 1 / 3, 2 / 3, 1 / 4, 3 / 4, 1 / 5, 2 / 5, 1 / 10, 1 / 2.5, 1 / 20])
 
 
@@ -86,7 +92,7 @@ def download_range(start: date, end: date, raw_dir: str | Path, fetch=_http_get,
     today = date.today()
     stats = {"downloaded": 0, "cached": 0, "holidays": 0, "failed": 0}
     days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
-    days = [d for d in days if d.weekday() < 5]
+    days = [d for d in days if d.weekday() < 5 or d in SPECIAL_SESSIONS]
     todo = [d for d in days if not (raw / f"{d:%Y%m%d}.csv.zip").exists()
             and not (f"{d:%Y%m%d}" in missing and (today - d).days > 7)]
     stats["cached"] = sum((raw / f"{d:%Y%m%d}.csv.zip").exists() for d in days)
@@ -263,19 +269,48 @@ def _load_overrides(path) -> pd.DataFrame:
 
 
 def detect_actions(close: pd.DataFrame, prev_close: pd.DataFrame, open_: pd.DataFrame, volume: pd.DataFrame,
-                   threshold: float = 0.03, gap_heuristic: bool = True) -> pd.DataFrame:
+                   threshold: float = 0.03, gap_heuristic: bool = True, stale_sessions: int = 5) -> pd.DataFrame:
     """Split / bonus events as (symbol, ex_date, factor, source).
 
     factor multiplies every price BEFORE ex_date (0.5 for a 1:1 bonus or 2:1 split).
+
+    The exchange's PREVCLOSE is adjusted on ex-dates, so prev_close / our last close != 1 marks a
+    corporate action - except when (a) a whole session is missing from our files (most stocks then
+    disagree by that session's move), or (b) the stock was away for weeks (e.g. traded in a series we
+    don't load), where the ratio is mostly price drift. Those cases need a much bigger, cleaner ratio.
+    The overnight-gap fallback looks for >30% opening gaps at clean ratios: NSE price bands (at most
+    20%) make such an open impossible for a real move - except for a stock returning after weeks away,
+    which is excluded so a genuine loss is never "adjusted" away.
     """
     last_close = close.ffill().shift(1)            # last traded close before each day
     rows = []
     ratio = (prev_close / last_close).where(close.notna())
-    hits = (ratio - 1).abs() > threshold
+    dev = (ratio - 1).abs()
+    seen = ratio.notna().sum(axis=1)
+    differ = (dev > 0.003).sum(axis=1) / seen.where(seen >= 20)
+    missing_session = (differ > 0.3).to_numpy()
+    for d in np.nonzero(missing_session)[0]:
+        log.warning("Bhavcopy %s: %.0f%% of stocks have a different previous close - the session before it "
+                    "is missing from data/nse/raw (special weekend session?). Run `indquant fetch`.",
+                    close.index[d].date(), 100 * differ.iloc[d])
+    obs = close.notna().to_numpy()
+    last_seen = np.where(obs, np.arange(len(close))[:, None], np.nan)
+    last_seen = pd.DataFrame(last_seen, index=close.index, columns=close.columns).ffill().shift(1)
+    away = (np.arange(len(close))[:, None] - last_seen.to_numpy()) > stale_sessions
+    hits = dev > threshold
+    arr, dev_arr = ratio.to_numpy(), dev.to_numpy()
     for (d, s) in zip(*np.nonzero(hits.to_numpy())):
-        rows.append((close.columns[s], close.index[d], float(ratio.iat[d, s]), "exchange_prev_close"))
+        r = float(arr[d, s])
+        if missing_session[d] and dev_arr[d, s] < 0.25:
+            continue                                  # just the missing session's price move
+        if away[d, s]:
+            k = int(np.argmin(np.abs(CLEAN_RATIOS - r)))
+            if abs(CLEAN_RATIOS[k] - r) / CLEAN_RATIOS[k] >= 0.03:
+                continue                              # drift while the stock was away, not an action
+        rows.append((close.columns[s], close.index[d], r, "exchange_prev_close"))
     if gap_heuristic:
-        gap = (open_ / last_close).where(close.notna() & ~hits)
+        gap = (open_ / last_close).where(close.notna() & ~hits & ~pd.DataFrame(away, index=close.index,
+                                                                                  columns=close.columns))
         vol_ratio = volume / volume.rolling(20, min_periods=5).median().shift(1)
         arr = gap.to_numpy()
         with np.errstate(invalid="ignore"):

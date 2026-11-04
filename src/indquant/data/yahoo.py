@@ -64,16 +64,21 @@ def download_prices(
     max_age_hours: float = 12,
     refresh: bool = False,
     chunk: int = 40,
+    adjust_dividends: bool = True,
 ) -> dict[str, pd.DataFrame]:
-    """Return {symbol: OHLCV frame}. Symbols without data are skipped with a warning."""
+    """Return {symbol: OHLCV frame}. Symbols without data are skipped with a warning.
+
+    ``adjust_dividends=False`` returns prices adjusted for splits/bonuses only (comparable with
+    exchange prices, which also exclude dividends)."""
     import yfinance as yf
 
     cache = Path(cache_dir)
     cache.mkdir(parents=True, exist_ok=True)
     out: dict[str, pd.DataFrame] = {}
     todo = []
+    suffix = "" if adjust_dividends else "__split_only"
     for sym in symbols:
-        path = _cache_path(cache, sym)
+        path = _cache_path(cache, sym + suffix)
         if not refresh and _fresh(path, max_age_hours):
             out[sym] = pd.read_parquet(path)
         else:
@@ -87,7 +92,7 @@ def download_prices(
         for attempt in range(3):
             try:
                 raw = yf.download(
-                    tickers=ysyms, start=start, end=end, auto_adjust=True, actions=False,
+                    tickers=ysyms, start=start, end=end, auto_adjust=adjust_dividends, actions=False,
                     group_by="ticker", threads=True, progress=False,
                 )
                 break
@@ -97,14 +102,14 @@ def download_prices(
         for sym, ysym in zip(batch, ysyms):
             df = _extract(raw, ysym, single=len(batch) == 1)
             if df is None:
-                stale = _cache_path(cache, sym)
+                stale = _cache_path(cache, sym + suffix)
                 if stale.exists():
                     log.warning("No fresh data for %s; using stale cache", sym)
                     out[sym] = pd.read_parquet(stale)
                 else:
                     log.warning("No data for %s (%s) - skipped", sym, ysym)
                 continue
-            df.to_parquet(_cache_path(cache, sym))
+            df.to_parquet(_cache_path(cache, sym + suffix))
             out[sym] = df
     if start:
         out = {k: v.loc[pd.Timestamp(start):] for k, v in out.items()}
