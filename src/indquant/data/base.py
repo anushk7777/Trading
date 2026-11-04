@@ -124,6 +124,44 @@ def clean_prices(frames: dict[str, pd.DataFrame], spike: float = 0.35) -> dict[s
     return out
 
 
+_SPLIT_RATIOS = [r for k in (2, 3, 4, 5, 10, 20, 25, 50, 100) for r in (1 / k, float(k))]
+
+
+def clean_index_series(s: pd.Series, max_move: float = 0.20, max_spike_days: int = 10) -> tuple[pd.Series, list[str]]:
+    """Repair an index / index-ETF price series from a free feed.
+
+    A broad Indian index has never moved 20% in one session (worst day: -13% on 23 Mar 2020), so any
+    bigger move is bad data. A jump that returns to the old level within ``max_spike_days`` is a bad
+    tick and is replaced by the last good price; a jump that never reverts is an unadjusted unit split
+    and earlier prices are rescaled. Returns the series and a description of each repair."""
+    x = s.dropna().astype(float)
+    v = x.to_numpy().copy()
+    fixes: list[str] = []
+    i = 1
+    while i < len(v):
+        jump = v[i] / v[i - 1] - 1
+        if abs(jump) <= max_move:
+            i += 1
+            continue
+        base = v[i - 1]
+        back = next((j for j in range(i + 1, min(len(v), i + max_spike_days + 1)) if abs(v[j] / base - 1) <= max_move),
+                    None)
+        if back is not None:
+            v[i:back] = base
+            fixes.append(f"{x.index[i].date()}: removed a {jump:+.0%} bad price lasting {back - i} day(s)")
+            i = back
+        else:
+            ratio = v[i] / v[i - 1]
+            clean = min(_SPLIT_RATIOS, key=lambda c: abs(np.log(ratio / c)))
+            factor = clean if abs(np.log(ratio / clean)) < 0.05 else ratio   # keep that day's real move
+            v[:i] *= factor
+            fixes.append(f"{x.index[i].date()}: {jump:+.0%} jump that never reverted - treated as an unadjusted split")
+            i += 1
+    out = s.astype(float).copy()
+    out.loc[x.index] = v
+    return out, fixes
+
+
 def _row_max(*frames: pd.DataFrame) -> pd.DataFrame:
     arr = np.fmax.reduce([f.to_numpy(dtype=float) for f in frames])
     return pd.DataFrame(arr, index=frames[0].index, columns=frames[0].columns).where(frames[-1].notna())

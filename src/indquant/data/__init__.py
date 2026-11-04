@@ -5,7 +5,7 @@ import logging
 
 import pandas as pd
 
-from .base import MarketData, clean_prices, frames_from_long
+from .base import MarketData, clean_index_series, clean_prices, frames_from_long
 from .synthetic import generate_synthetic_market
 
 log = logging.getLogger(__name__)
@@ -37,6 +37,16 @@ def load_market_data(cfg, as_of=None, refresh: bool = False) -> MarketData:
     return data
 
 
+def _clean_bench(name: str, s: pd.Series, notes: list[str]) -> pd.Series:
+    """Bad ticks in the free benchmark feed corrupt alpha, beta and drawdown statistics - repair them."""
+    cleaned, fixes = clean_index_series(s)
+    if fixes:
+        msg = f"Repaired {len(fixes)} impossible price move(s) in {name} from Yahoo: " + "; ".join(fixes[:5])
+        log.warning(msg)
+        notes.append(msg)
+    return cleaned
+
+
 def _load_real(cfg, refresh: bool) -> MarketData:
     from .universe import load_membership, load_universe
 
@@ -59,8 +69,10 @@ def _load_real(cfg, refresh: bool) -> MarketData:
     missing_bench = [b for b in bench_syms if b not in records]
     if missing_bench:
         raise RuntimeError(f"Benchmark/index data missing for {missing_bench}; cannot build trading calendar")
-    bench = records.pop(cfg.data.benchmark)["Close"]
-    index = records[cfg.data.regime_index]["Close"] if cfg.data.regime_index in records else bench
+    bench_notes: list[str] = []
+    bench = _clean_bench(cfg.data.benchmark, records.pop(cfg.data.benchmark)["Close"], bench_notes)
+    index = _clean_bench(cfg.data.regime_index, records[cfg.data.regime_index]["Close"], bench_notes) \
+        if cfg.data.regime_index in records else bench
     records.pop(cfg.data.regime_index, None)
     if not records:
         raise RuntimeError("No stock data loaded")
@@ -88,7 +100,7 @@ def _load_real(cfg, refresh: bool) -> MarketData:
         open=frames["open"], high=frames["high"], low=frames["low"], close=frames["close"],
         volume=frames["volume"], benchmark=bench, index=index, sectors=sectors,
         membership=membership, fundamentals=fundamentals, source=cfg.data.source,
-        survivorship_free=survivorship_free,
+        survivorship_free=survivorship_free, notes=bench_notes,
     )
 
 
@@ -120,8 +132,10 @@ def _load_nse(cfg, refresh: bool) -> MarketData:
     member = panel["membership"]
     ew = frames["close"].pct_change(fill_method=None).where(member).mean(axis=1).fillna(0.0)
     ew_index = (1 + ew).cumprod() * 1000
-    bench = recs[cfg.data.benchmark]["Close"] if cfg.data.benchmark in recs else None
-    index = recs[cfg.data.regime_index]["Close"] if cfg.data.regime_index in recs else None
+    bench = _clean_bench(cfg.data.benchmark, recs[cfg.data.benchmark]["Close"], notes) \
+        if cfg.data.benchmark in recs else None
+    index = _clean_bench(cfg.data.regime_index, recs[cfg.data.regime_index]["Close"], notes) \
+        if cfg.data.regime_index in recs else None
     if bench is None or index is None:
         notes.append("Benchmark/index unavailable from Yahoo - using an equal-weight index of the point-in-time "
                      "universe instead (price-only).")
@@ -161,7 +175,7 @@ def _extra_benchmarks(cfg, calendar, refresh: bool) -> dict:
     except Exception as exc:
         log.warning("Extra benchmarks unavailable: %s", exc)
         return {}
-    return {k: v["Close"].reindex(calendar).ffill() for k, v in recs.items()}
+    return {k: _clean_bench(k, v["Close"], []).reindex(calendar).ffill() for k, v in recs.items()}
 
 
 def _disclosures(cfg, data, refresh: bool) -> dict:

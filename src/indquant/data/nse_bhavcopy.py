@@ -94,7 +94,7 @@ def download_range(start: date, end: date, raw_dir: str | Path, fetch=_http_get,
     if not todo:
         return stats
     log.info("Downloading %d NSE daily price files (%s to %s) into %s. %s", len(todo), todo[0], todo[-1], raw,
-             ("First time: about 30-60 minutes. " if stats["cached"] < 50 else "")
+             ("First time: about 30-60 minutes. " if len(todo) > 500 else "")
              + "Safe to stop with Ctrl+C; run the same command again to resume.")
     t0 = last = time.monotonic()
     streak = 0
